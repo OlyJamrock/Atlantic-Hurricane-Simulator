@@ -18,7 +18,7 @@
 // (beta-effect from the meridional gradient of planetary vorticity —
 // simplified to a fixed nudge rather than solving vorticity advection).
 
-import { GRID, ENVIRONMENT as ENV, STORM as ST, TRACK_WOBBLE as WOB, ERC, RI, SIZE as SZ, CAG, ET, OUTFLOW, REMNANT as REM } from './constants.js';
+import { GRID, ENVIRONMENT as ENV, STORM as ST, TRACK_WOBBLE as WOB, ERC, RI, SIZE as SZ, CAG, ET, OUTFLOW, REMNANT as REM, FUJIWHARA as FUJI } from './constants.js';
 import { classify, windToPressureMb, windFromPressureMb } from './scale.js';
 
 // MPI table: SST (deg C) -> [pressure mb, wind midpoint kt, wind half-
@@ -121,6 +121,10 @@ export class Storm {
     this.shearEma = null;
     this.outflowEma = 0;
     this.weakDays = 0; // cumulative time spent below ST.weakLingerThresholdKt without organizing
+    // Fujiwhara / storm-storm interaction state — see _fujiwharaInteraction.
+    this.fujiwharaAbsorbDays = 0;
+    this.absorbed = false;
+    this.absorbedByNumber = null;
     this.ace = 0;
     this.forwardSpeedKt = 0;
     this.headingRad = 0;
@@ -372,7 +376,87 @@ export class Storm {
         channelCount++;
       }
     }
+    // Traveling upper-level anticyclones — real ventilation aid for any
+    // system they meander over/near, distinct from the trough/ULL
+    // "channel" mechanic above (an anticyclone is a genuinely different
+    // kind of upper-level support: divergent outflow, not a trough's
+    // baroclinic pull).
+    for (const a of env.upperAnticyclones || []) {
+      const d = Math.hypot(a.lat - this.lat, a.lon - this.lon);
+      if (d < ENV.anticycloneRadiusDeg) {
+        const proximity = 1 - d / ENV.anticycloneRadiusDeg;
+        outflowAidKt += proximity * ENV.anticycloneVentilationAidKt;
+        channelCount++;
+      }
+    }
     return { pullU, pullV, outflowAidKt, nearestDist, channelCount };
+  }
+
+  // Fujiwhara interaction with other live tropical cyclones: two vortices
+  // within real range mutually orbit their combined center cyclonically
+  // (Northern Hemisphere), the weaker one deflected more than the
+  // stronger one (its own vorticity/inertia is smaller) — this is the
+  // actual mechanism keeping two nearby TCs from just passing straight
+  // through each other's paths, not a hard collision rule. Separately, a
+  // meaningfully dominant neighbor's anticyclonic upper-level outflow
+  // imposes real shear on a nearby weaker system — distinct from, and
+  // additive with, ordinary environmental shear — and at sustained close
+  // range that weaker system is genuinely absorbed rather than surviving
+  // as an independent circulation.
+  _fujiwharaInteraction(allStorms, dtDays) {
+    let pullU = 0, pullV = 0, outflowShearKt = 0, absorbedThisTick = false;
+    if (this.phase === 'tropical') {
+      for (const other of allStorms) {
+        if (other === this || other.dissipated || other.phase === 'remnant') continue;
+        const dLat = other.lat - this.lat, dLon = other.lon - this.lon;
+        const dist = Math.hypot(dLat, dLon);
+        if (dist > FUJI.interactionRadiusDeg || dist < 0.02) continue;
+
+        const totalKt = this.intensityKt + other.intensityKt;
+        const myShare = totalKt > 0 ? this.intensityKt / totalKt : 0.5;
+        const proximity = Math.max(0, 1 - dist / FUJI.interactionRadiusDeg);
+        const orbitalSpeedKt = FUJI.orbitMagKt * proximity * proximity * Math.min(1, totalKt / 130);
+        const deflectionWeight = 1 - myShare; // the relatively weaker of the pair gets deflected more
+        const dirLat = dLat / dist, dirLon = dLon / dist;
+        // Rotate the "toward the other storm" unit vector +90 degrees for
+        // a cyclonic (counterclockwise) mutual orbit around their shared
+        // center, matching real Northern-Hemisphere Fujiwhara rotation.
+        pullU += -dirLat * orbitalSpeedKt * deflectionWeight;
+        pullV += dirLon * orbitalSpeedKt * deflectionWeight;
+
+        // Anticyclonic outflow shear: only a meaningfully dominant
+        // neighbor imposes this — two comparably-matched storms mostly
+        // just orbit each other (above) rather than meaningfully
+        // shearing one another apart.
+        if (other.intensityKt > this.intensityKt * FUJI.outflowDominanceRatio) {
+          const outflowRadius = FUJI.outflowBaseRadiusDeg + other.intensityKt / 22;
+          if (dist < outflowRadius) {
+            const falloff = 1 - dist / outflowRadius;
+            const dominance = Math.min(1, (other.intensityKt - this.intensityKt) / 60);
+            outflowShearKt += falloff * dominance * FUJI.outflowShearMaxKt;
+          }
+        }
+
+        // Absorption: sustained, very close proximity to a much
+        // stronger system — real, if the geometry stays close long
+        // enough (not an instant snap the moment the radius is crossed).
+        if (dist < FUJI.absorptionRadiusDeg && other.intensityKt >= this.intensityKt * FUJI.absorptionDominanceRatio) {
+          this.fujiwharaAbsorbDays += dtDays;
+          if (this.fujiwharaAbsorbDays >= FUJI.absorptionDays) {
+            this.dissipated = true;
+            this.absorbed = true;
+            this.absorbedByNumber = other.number;
+            other.sizeFactor = Math.min(1.4, other.sizeFactor * FUJI.absorptionSizeBoost);
+            absorbedThisTick = true;
+            break;
+          }
+        }
+      }
+    }
+    if (!absorbedThisTick && this.fujiwharaAbsorbDays > 0) {
+      this.fujiwharaAbsorbDays = Math.max(0, this.fujiwharaAbsorbDays - dtDays * 2);
+    }
+    return { pullU, pullV, outflowShearKt };
   }
 
   // Distance to the nearest genuinely separate extratropical low (see
@@ -392,12 +476,21 @@ export class Storm {
     return Math.min(nearest, troughFallbackDist);
   }
 
-  step(env, osc, dtDays, dayNum, rand = Math.random) {
+  step(env, osc, dtDays, dayNum, rand = Math.random, allStorms = []) {
     if (this.dissipated) return;
 
     const s = env.stateAt(this.lat, this.lon);
     this.lastEnv = s;
     this.ageDays += dtDays;
+
+    // Fujiwhara / storm-storm interaction, checked up front — absorption
+    // can end this storm's life this tick, before any of the intensity
+    // model below runs.
+    const fuji = this._fujiwharaInteraction(allStorms, dtDays);
+    if (this.dissipated) {
+      this._advance(env, s, this._troughCapture(env), dtDays, dayNum, rand);
+      return;
+    }
 
     // ---- Intensity ----
     // Smoothed shear: a real storm's inner core responds to sustained
@@ -429,6 +522,11 @@ export class Storm {
       Math.max(0, this.shearEma - ST.shearToleranceKt) * ST.weakenShearFactor * resilience;
     const troughAid = this._troughInteractionKt(s.upperHeight);
     const capture = this._troughCapture(env);
+    // Merge the Fujiwhara mutual-orbit pull in with the trough-capture
+    // pull — both are "extra steering beyond the smooth environmental
+    // flow" and _advance already treats capture.pullU/V that way.
+    capture.pullU += fuji.pullU;
+    capture.pullV += fuji.pullV;
     // Decent upper-level ventilation (trough interaction, outflow aid)
     // genuinely helps a storm shrug off marginal shear — real hurricanes
     // in an otherwise-so-so environment can still organize and even
@@ -438,7 +536,13 @@ export class Storm {
     // irrelevant.
     const ventilationQuality = Math.max(0, troughAid) + Math.max(0, capture.outflowAidKt);
     const ventilationShearOffset = Math.min(rawShearPenalty * 0.6, ventilationQuality * ST.ventilationShearOffsetCoeff);
-    const shearPenalty = Math.max(0, rawShearPenalty - ventilationShearOffset);
+    // A dominant nearby storm's outflow shear (see _fujiwharaInteraction)
+    // is a real, distinct hostile influence on top of ordinary
+    // environmental shear — a storm's own good ventilation doesn't buy
+    // headroom against being directly sheared by a neighbor's outflow
+    // the way it does against ambient shear, so this is added after the
+    // ventilation offset rather than folded into rawShearPenalty above.
+    const shearPenalty = Math.max(0, rawShearPenalty - ventilationShearOffset) + fuji.outflowShearKt;
     const dryPenalty = s.dryAir * ST.dryAirWeakenFactor * ageResilience;
 
     // Sustained upper-level ventilation quality: real max potential

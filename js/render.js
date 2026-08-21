@@ -10,7 +10,7 @@ import { GRID } from './constants.js';
 import { classify } from './scale.js';
 import { LAND_POLYGONS } from './land-data.js';
 import { genesisPotential, formationOdds, TropicalWave } from './waves.js';
-import { GENESIS, CAG, STORM as ST, MDR_FEEDBACK as MDRF } from './constants.js';
+import { GENESIS, STORM as ST, MDR_FEEDBACK as MDRF } from './constants.js';
 import { calendarYearOf } from './names.js';
 
 const PALETTE = {
@@ -143,7 +143,6 @@ export class Renderer {
     this.showForecastCone = false;
     this.showForecastSpaghetti = false;
     this.showSwath = false;
-    this.showCagZone = true;
     this.showFronts = true;
     this.showItcz = true;
     this.showMonsoonTrough = true;
@@ -903,7 +902,7 @@ export class Renderer {
       if (wave.spawned) continue;
       const x0 = this.lonToX(wave.lon), y0 = this.latToY(wave.lat);
       if (x0 < -140 || x0 > this.cssW + 140) continue;
-      const gpi = genesisPotential(env, osc, wave.lat, wave.lon, dayNum);
+      const gpi = genesisPotential(env, osc, wave.lat, wave.lon, dayNum, wave.landDisruption);
       const odds = formationOdds(gpi, GENESIS.gpiThreshold);
       if (odds.pct7day < 10) continue;
       const risk = odds.pct7day > 60 ? [255, 90, 90] : odds.pct7day >= 40 ? [255, 170, 60] : [255, 220, 80];
@@ -1037,9 +1036,11 @@ export class Renderer {
     ctx.fillText('ITCZ', 16, y - 12);
   }
 
-  // Caribbean monsoon trough: dashed magenta line with a bold label,
-  // matching the real reference style — only shown once it's genuinely
-  // seasonally active, not year-round.
+  // Caribbean monsoon trough: dashed magenta line, matching the real
+  // reference style — only shown once it's genuinely seasonally active,
+  // not year-round. Unlabeled, matching how the ITCZ/other synoptic
+  // features on this map are meant to be read from their line style
+  // alone rather than needing a text tag.
   drawMonsoonTrough(env, dayNum) {
     const { ctx } = this;
     const strength = env.monsoonTroughStrength(dayNum);
@@ -1061,18 +1062,6 @@ export class Renderer {
     }
     ctx.stroke();
     ctx.setLineDash([]);
-
-    const labelLon = lonMin + (lonMax - lonMin) * 0.62;
-    const labelLat = latC + 3.2;
-    const lx = this.lonToX(labelLon), ly = this.latToY(labelLat);
-    ctx.font = 'bold 12px "JetBrains Mono", monospace';
-    ctx.textAlign = 'center';
-    const text = 'MONSOON TROUGH';
-    const textW = ctx.measureText(text).width;
-    ctx.fillStyle = 'rgba(155, 35, 165, 0.92)';
-    ctx.fillRect(lx - textW / 2 - 7, ly - 11, textW + 14, 21);
-    ctx.fillStyle = '#ffffff';
-    ctx.fillText(text, lx, ly + 4);
   }
 
   drawMdrBox(env) {
@@ -1093,29 +1082,6 @@ export class Renderer {
     ctx.fillRect(x1 + 2, y1 + 4, textW + 12, 20);
     ctx.fillStyle = 'rgba(255, 209, 102, 0.95)';
     ctx.fillText(label, x1 + 8, y1 + 19);
-  }
-
-  drawCagZone(dayNum) {
-    const doy = dayNum % 365;
-    const seasonality =
-      Math.exp(-0.5 * Math.pow((doy - CAG.peak1DayOfYear) / CAG.width, 2)) +
-      Math.exp(-0.5 * Math.pow((doy - CAG.peak2DayOfYear) / CAG.width, 2));
-    if (seasonality < 0.15) return;
-    const { ctx } = this;
-    const x1 = this.lonToX(CAG.lonMin), x2 = this.lonToX(CAG.lonMax);
-    const y1 = this.latToY(CAG.latMax), y2 = this.latToY(CAG.latMin);
-    const alpha = Math.min(0.22, seasonality * 0.22);
-    ctx.fillStyle = `rgba(180, 130, 255, ${alpha})`;
-    ctx.fillRect(x1, y1, x2 - x1, y2 - y1);
-    ctx.strokeStyle = `rgba(180, 130, 255, ${Math.min(0.6, alpha * 2.2)})`;
-    ctx.setLineDash([5, 4]);
-    ctx.lineWidth = 1.5;
-    ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
-    ctx.setLineDash([]);
-    ctx.font = '10px "JetBrains Mono", monospace';
-    ctx.fillStyle = `rgba(220, 190, 255, ${Math.min(0.85, alpha * 3)})`;
-    ctx.textAlign = 'left';
-    ctx.fillText('CAG watch zone', x1 + 5, y1 + 13);
   }
 
   drawWaves(waveSource) {
@@ -1519,7 +1485,6 @@ export class Renderer {
     if (this.showOutlook) this.drawGenesisOutlook(world.env, world.osc, world.waveSource, world.dayNum);
     if (this.showPastTracks) this.drawPastTracks(world.archive, highlightArchiveId, calendarYearOf(world.dayNum));
     if (viewingSeasonYear != null) this.drawSeasonTracks(world.archive, viewingSeasonYear, highlightArchiveId);
-    if (this.showCagZone) this.drawCagZone(world.dayNum);
     if (this.overlay === 'mdrsst') this.drawMdrBox(world.env);
     if (this.showItcz) this.drawItcz(world.env, world.dayNum);
     if (this.showMonsoonTrough) this.drawMonsoonTrough(world.env, world.dayNum);

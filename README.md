@@ -28,6 +28,8 @@ Headless sanity checks (no browser needed) live in `tools/`:
 node tools/headless-sanity-check.mjs   # runs one season, prints genesis/intensity stats
 node tools/track-survey.mjs            # prints sample tracks from several strong storms
 node tools/recurve-check.mjs           # measures how many strong storms recurve vs. hit land
+node tools/high-survey.mjs             # Bermuda-Azores high position/strength distribution over N seasons
+node tools/fujiwhara-check.mjs         # confirms storm-storm absorption and genesis-spacing actually fire
 ```
 
 ## Architecture
@@ -2715,6 +2717,606 @@ ENSO/MDR conditions the way genesis frequency now is — hyperactive
 seasons currently emerge only from more-frequent genesis under
 favorable conditions, not from storms also running measurably stronger;
 that would be a reasonable next step.
+
+## v6.3 (ENSO/MDR-tied intensification — completes the hyperactive-season mechanism, fixed a critical NaN bug found along the way)
+
+- **Tied storm intensity directly to ENSO/MDR conditions**, completing
+  the gap flagged last round: hyperactive seasons can now emerge from
+  storms running measurably stronger under favorable conditions, not
+  just from more frequent genesis. Same sign convention as the genesis-
+  frequency modulation from before: -ENSO (La Nina) and a warm MDR/
+  East-Atlantic anomaly (same region covers "warm Canary Current") both
+  boost the intensification approach rate; +ENSO and a cool MDR anomaly
+  suppress it. Layered on top of the existing indirect shear/SST
+  channels, not a replacement for them.
+- **Found and fixed a critical NaN bug in the process**: the intensity-
+  coupling code referenced two constants that didn't actually exist in
+  the constants file. Every storm's intensity was silently becoming NaN
+  on its very first tick — confirmed directly before touching anything
+  further. Added the missing constants, re-confirmed a real, finite
+  intensity value afterward, then re-ran the full regression suite to
+  make sure the fix held across a real season, not just the isolated
+  check.
+- **Verified the coupling's direction and magnitude in isolation** from
+  the existing indirect shear/SST effects: forcing favorable vs.
+  unfavorable ENSO/MDR conditions produced a 9.7kt intensity difference
+  after 3 days from the direct coupling alone — meaning the combined
+  real-world effect (direct coupling plus the pre-existing indirect
+  shear/SST channels, which also respond to the same conditions) will
+  be larger than this isolated figure.
+- Full regression suite: healthy.
+
+## v6.4 (subtropical genesis restored again, TD naming/display mismatch fixed, comprehensive EPac coastline zone, MDR/Caribbean track stability)
+
+- **Subtropical genesis "severe decline"**: traced to a real interaction
+  between two earlier, separately-correct fixes — the SST climatology
+  redesign (cooling 28-45N to stop storms holding major intensity that
+  far north) made SST too often fail the subtropical genesis threshold
+  in the same latitude band where troughs now typically sit (after the
+  trough-latitude fix). Lowered the threshold to compensate. Verified
+  deterministically rather than trusting noisy single-season counts:
+  eligibility improved from 74.0% to 96.0% of trough positions in range.
+- **TD naming/display mismatch**: the naming trigger and the
+  Tropical-Depression/Tropical-Storm classification boundary both used
+  a hard 34kt, but the UI displays *rounded* intensity — a storm at
+  33.5-33.99kt was showing "34kt" on screen while failing both checks
+  internally, looking like TDs simply weren't getting named at 34kt.
+  Aligned both thresholds to 33.5kt so anything reading "34kt" on
+  screen is actually treated as a named tropical storm at that exact
+  moment. Left ACE and other statistical/peak-based thresholds at the
+  true 34kt (real meteorological convention) — only the two genuinely
+  display-facing spots needed the fix.
+- **Comprehensive EPac coastline zone**: the existing fix only covered
+  a narrow Panama-specific exception; the real Central American Pacific
+  coastline curves well east of the general basin boundary for its
+  *entire* run from Panama up through southern Mexico, not just near
+  Panama. Replaced it with a 5-segment piecewise coastline boundary and
+  verified all 13 test points on both sides before trusting it (Jamaica,
+  the Gulf of Honduras, and the Nicaraguan/Honduran Caribbean coasts
+  correctly stay Atlantic; Panama's, Costa Rica's, Nicaragua's, El
+  Salvador's, Guatemala's, and Mexico's Pacific coasts all correctly
+  read as EPac) — caught and fixed a boundary gap at El Salvador's coast
+  during that verification.
+- **MDR/southern-basin track stability**: added a southern taper to the
+  850mb layer's meridional noise specifically (the zonal component and
+  the ridge-driven geostrophic flow are untouched), fading to near-zero
+  right at the ITCZ and back to full by ~16°N — routine noise no longer
+  makes storms "dive south" near the ITCZ, while a genuinely strong
+  ridge (via the untouched geostrophic component) can still occasionally
+  force one south, matching how that's real but comparatively rare.
+- **Caribbean "wacky tracks" from over-eager trough capture**: found the
+  capture radius (24°) let even a trough sitting at its new typical
+  latitude (33N+) meaningfully tug on storms far south in the Caribbean.
+  Reduced to 17° — a trough now has to be genuinely nearby to pick a
+  storm up, while the existing strength-based pull magnitude still
+  scales a weak trough's gentle nudge against a strong one's real hook.
+- Full regression suite: healthy after every change.
+
+## v6.5 (fixed a real physics bug: trough capture pull ignored the trough's actual position)
+
+- **Found and fixed the real reason "hook into the Gulf" was never
+  possible and Caribbean tracks felt "wacky"**: while re-examining the
+  trough capture graduation I'd flagged as unverified last round, found
+  that the pull direction was completely fixed (always northeast-ish)
+  regardless of where the trough actually was relative to the storm —
+  `nearestDLat`/`nearestDLon` were computed but never actually used in
+  the pull calculation. Every trough interaction recurved a storm the
+  same way no matter its real geometry, and since the pull was always
+  eastward, a storm getting hooked westward into the Gulf was
+  structurally impossible before this fix, not just rare.
+- **Redesigned the pull to use real geometry**: rotates the direct
+  line-to-trough vector to match actual counterclockwise circulation
+  around a Northern Hemisphere upper trough/low. Verified directly
+  against three distinct geometries: a trough northwest of the storm
+  now correctly pulls it northeast (the classic recurve), a trough
+  southeast of the storm pulls it southwest instead (the genuine "hook
+  toward the Gulf" case when the geometry lines up that way), and a
+  trough directly north gives a pure eastward pull — confirming the
+  direction genuinely responds to position rather than always doing the
+  same thing.
+- Full regression suite: healthy. Checked all usage sites of the pull
+  values to confirm nothing downstream assumed the old fixed-sign
+  behavior.
+
+## v6.6 (fixed the subtropical-ridge periphery curvature — the "why does everything just go west" bug)
+
+- **Found the real cause of waves/weak storms continuing due-west north
+  of the Antilles instead of curving WNW/northerly**: the meridional
+  (curving) component of the ridge-driven geostrophic steering was
+  present but far too weak. Directly measured a transect from the deep
+  MDR through the eastern Caribbean to the Bahamas: the northward pull
+  barely grew at all (1.0→1.3kt) while the westward push stayed
+  dominant (-13→-4kt) the entire way — nowhere near the real subtropical
+  -ridge-periphery curvature shown in the reference images (arrows
+  going from near-zonal along the ridge's southern flank to genuinely
+  poleward along its western edge).
+- **Split the single shared geostrophic scale into separate zonal
+  (unchanged) and meridional (raised) components**, since a single
+  shared scale couldn't be increased for curvature without also over-
+  amplifying the already-correct zonal push in the deep tropics.
+  Iterated on the actual value rather than guessing once: an initial
+  aggressive setting produced real WNW curvature in isolated field
+  testing, but measuring real storm tracks in full simulated seasons
+  (not just the isolated field) showed the combined effect — this new
+  curvature stacking with last round's trough-capture directional fix —
+  was pulling storms almost due north (105-106° average heading,
+  consistent across two seeds) rather than the requested WNW. Dialed
+  the scale back and re-verified: real track headings through the same
+  zone now average 139-147° (genuinely WNW), consistent across two
+  seeds, with the deep tropics still reading a near-zonal 171-177°.
+- This is the same mechanism referenced in the images provided — flow
+  parallels the ridge's southern flank at low latitude, then curves
+  measurably more poleward approaching the ridge's western edge — now
+  reflected in the actual steering field instead of staying flat.
+- Full regression suite: healthy throughout.
+
+## v6.7 (hard real-world pressure ceilings for weak storms)
+
+- **Fixed unrealistically weak (high mb) pressure readings at the low
+  end**: the flat ±28mb gradient-offset clamp was physically reasonable
+  for stronger storms but let TD/TS systems read as high as 1034mb and
+  Cat1 hurricanes as high as 1014mb — real ones never exceed 1020mb and
+  1000mb respectively. Added hard, intensity-tiered ceilings on top of
+  the existing offset clamp: TD/TS capped at 1020mb, Cat1 capped at
+  1000mb, applied in `_updatePressure` so every code path that sets a
+  storm's pressure benefits automatically. Left Cat2+ untouched, where
+  the wider variance is real.
+- Verified the resulting table is smooth with no discontinuity — the
+  tier clamps only activate where they'd otherwise be violated (25-60kt
+  needed the 1020 clamp only up to 50kt, since the natural curve is
+  already below it by 55-60kt; the 1000mb clamp only mattered for
+  65-75kt, since 80kt+ is naturally already below it).
+- Checked a full simulated season directly: 464 track points, only one
+  transitional case (a storm crossing the 64kt threshold in a single
+  tick, pressure still catching up to the newly-applicable stricter
+  ceiling for 1-2 ticks before converging) — the same kind of expected
+  lag-catchup behavior already present elsewhere, not a gap in the fix.
+- Full regression suite: healthy.
+
+## v6.8 (recalibrated weak-end pressure ceiling to a smooth, precisely-anchored curve)
+
+- **Tightened further based on specific case-study data points**: a
+  55kt storm should never exceed 1010mb, an 80kt storm never above
+  995mb — both meaningfully tighter than the discrete two-tier clamp
+  from last round (which allowed 1017mb and 998mb at those exact winds).
+  Replaced the discrete tiers with a smooth, piecewise-linear ceiling
+  anchored precisely at these values, tightest at the weak end (a
+  barely-organized TD basically has to sit close to its mean pressure)
+  and widening back to the original flat allowance by Cat3 territory
+  (100kt+), where the wider variance is real and wasn't in question.
+- Verified the exact anchor points land precisely: computed ceiling
+  table gives exactly 1010mb at 55kt and 995mb at 80kt, not
+  approximately. Checked the full curve for smoothness (monotonic, no
+  discontinuities) across 25-100kt.
+- Checked a full simulated season against the new table directly:
+  zero violations across 391 track points in the 25-100kt range.
+- Full regression suite: healthy.
+
+## v6.9 (corrected the weak-end curve's endpoint — 85kt+ was unintentionally affected)
+
+- **Fixed a scope overshoot from last round**: the smooth ceiling
+  curve's last anchor was at 100kt, meaning it was still ramping up
+  (not yet at the full original ±28mb) between 85-100kt — quietly
+  tightening a range that was never asked about. Moved the final anchor
+  to 85kt, where the curve now reaches exactly the original,
+  unmodified ±28mb allowance and holds flat above it.
+- Verified precisely: 85kt and every value above it now match the
+  original flat-28mb ceiling exactly (993mb at 85kt, 990 at 90kt, 986 at
+  95kt, 982 at 100kt, and so on through 150kt+) — not approximately
+  close, exactly equal. 55kt and 80kt still land exactly on the
+  requested 1010mb/995mb targets from last round.
+- Full regression suite: healthy.
+
+## v7.0 (seasonal wave-latitude structure, Coriolis genesis gate, land-disruption memory, wider warm pool)
+
+- **Full seasonal wave-latitude structure**: previously only had a late-
+  season decline; now has genuine early/peak/late character. Verified
+  via distribution sampling at each key date: June 1 is tight and low
+  (median 8.9°N, p10-p90 range 6.4-11.6 — "low riders"), peak season
+  (Sep 10) widens dramatically rather than just shifting up (median
+  13.0°N, range 7.5-18.8 — genuinely allows both 20°N-ish emergence and
+  low riders side by side, as requested), and by Dec 15 it's back to
+  tight and low (median 9.1°N, range 6.5-11.6) — matching all three
+  described phases precisely.
+- **Added a real Coriolis constraint to genesis potential**: previously
+  nothing in the GPI formula penalized low latitude at all — a wave
+  right at the equator could show full genesis potential. Added a hard,
+  multiplicative gate (not an additive term favorable conditions could
+  outweigh) that zeroes GPI at the equator and ramps to full strength by
+  ~10°N. Verified directly: GPI is exactly 0 at lat 2, growing smoothly
+  to 0.63 by lat 10.
+- **Added land-disruption memory for waves crossing large landmasses**
+  (e.g., northern South America): previously GPI reset to full potential
+  the instant a wave cleared back over water, with zero lasting effect.
+  Now tracks accumulated disruption that builds while over land and
+  decays gradually afterward (slower to recover than to disrupt).
+  Verified with a real forced crossing: disruption climbed to 1.0 while
+  over land, then took ~4 days to fully decay after clearing the coast,
+  rather than resetting instantly.
+- **Widened the Western Hemisphere Warm Pool's spatial gradient** to
+  better match the reference SST climatology (warmer, more concentrated
+  west, cooling toward the central/eastern tropical Atlantic) — raised
+  the peak boost and widened its falloff. Kept this a modest, directional
+  adjustment rather than an aggressive rebuild, given how extensively
+  this SST field has already been tuned in prior rounds for other,
+  separately-verified reasons (the Cat5-past-38N fix in particular).
+- Full regression suite: healthy. One seed showed a notably quiet season
+  after these changes — checked a different seed to confirm this was
+  ordinary RNG-stream noise (a different seed showed a completely normal
+  16-storm season), not a systemic effect of the new constraints.
+
+## v7.1 (waves succeeding too often at genesis; too few TCs dissipating over open water)
+
+- **Found the actual cause of waves developing too often**: crossing the
+  GPI threshold guaranteed immediate genesis with no further chance
+  involved — effectively "if a wave ever briefly touches favorable
+  conditions once, it becomes a storm." Added a genuine stochastic
+  success gate on top of crossing the threshold: only 15% chance right
+  at the threshold, climbing to a 90% cap as conditions get more
+  comfortably favorable. Verified the curve directly (15%→30%→45%→60%→
+  75%→90% as the margin above threshold grows).
+- **Investigated "not enough TCs dissipate over water" by measuring
+  first, not guessing**: a real season showed only 17% of dissipations
+  happening over open water versus land/absorption. Tested whether the
+  underlying mechanism even works at all — forced persistent hostile
+  shear over warm open water and confirmed a storm can fully dissipate
+  that way (day 1.5, from 46kt down through remnant to full
+  dissipation) — so the mechanism itself wasn't broken, storms just
+  weren't reliably accumulating enough *sustained* penalty under
+  natural, more variable conditions. Raised the base shear-weakening
+  factor modestly (2.1→2.5) rather than rebuilding the mechanism.
+  Verified against two separate seeds: open-water dissipation rate rose
+  from 17% to 22% and 23.5% respectively — a real, consistent
+  improvement, though not calibrated against a precise target since
+  none was given; may need further tuning if this still reads low once
+  observed in practice.
+- Full regression suite: healthy throughout.
+
+## v7.2 (removed CAG watch box and monsoon trough label, fixed a real shear-physics inconsistency)
+
+- **Removed the CAG watch zone entirely**: HTML toggle button, JS
+  wiring, the render call, and the drawing method itself — not just
+  hidden, fully removed.
+- **Removed the monsoon trough's text label**, keeping the dashed-line
+  visual itself unchanged.
+- **Fixed a genuine shear-physics inconsistency**: found that the shear
+  vector's direction was computed from a crude, standalone "lower
+  level" approximation (`tradeEasterly * 0.6`, a fixed `+0.15` V
+  component) that completely ignored the real, fully-built 850mb wind
+  field (`steer850U/V`) already sitting right there in the same
+  function — real noise, ridge coupling, the southern-MDR stability
+  taper, none of it was actually feeding the shear direction storms are
+  rendered against. The "upper" side also omitted the jet stream
+  despite it being a major real-world shear contributor already
+  computed in the same block. Fixed both — shear direction is now a
+  genuine upper-minus-lower difference between the actual wind layers
+  this simulation builds (including the jet), not an inconsistent
+  standalone stand-in. Deliberately direction-only: the shear
+  *magnitude* — what actually drives genesis/intensification — still
+  comes from the existing, extensively-calibrated composite formula and
+  was left untouched, to avoid risking the substantial prior tuning work
+  behind it. Verified directly: the resulting vector's magnitude still
+  exactly equals the calibrated scalar (22.5 both ways), confirming the
+  fix only changed direction, not any storm-affecting behavior — full
+  regression suite output was byte-for-byte identical before and after.
+
+### Scope note on "more realistic shear physics"
+
+A full redesign of the shear *magnitude* itself as a true vector
+difference (rather than the current parameterized composite of ENSO,
+MJO, TUTT, ULL, trough, and seasonal terms) would be a larger, higher-
+risk undertaking given how much genesis/intensity calibration currently
+depends on that formula's exact values. Chose the lower-risk, still
+genuinely valuable fix (direction) this round rather than risk that
+calibration without a much longer, dedicated verification pass.
+
+## v7.3 (rebalanced genesis geography — found and fixed the actual shear bug suppressing subtropical/eastern MDR/SW Atlantic genesis)
+
+- **Measured the imbalance directly before touching anything**: two full
+  seasons showed Caribbean genesis at 53-67% of all events, while SW
+  Atlantic ("Bermuda Triangle"), eastern MDR (Cape Verde territory), and
+  the broader subtropics all showed zero. A stark, consistent pattern
+  across both seeds — confirmed the complaint precisely.
+- **Found the actual root cause**: the base climatological shear
+  formula's latitude ramp alone put the baseline at ~18kt by lat26
+  during peak season — before adding TUTT, ENSO, or any other term —
+  against a 20kt genesis threshold. That left almost no room for the
+  subtropics to ever dip below threshold, even during otherwise-
+  favorable synoptic moments. Lowered the peak/off-season high-latitude
+  anchors (24→19, 40→34).
+- **Fixed the TUTT being "permanently too high"** exactly as described:
+  its floor (the minimum strength it could ever fall to, even fully
+  off-season) was 25% of peak — meaning it never actually went away.
+  Dropped to 8%, and tightened its width/peak boost so it reads as
+  genuinely seasonal rather than a semi-permanent shield sitting over
+  the eastern MDR/subtropics boundary.
+- **Reduced the two Caribbean-specific genesis pathways modestly** (CAG
+  0.0085→0.0072, monsoon trough 0.0034→0.0026) — both had been
+  separately boosted/bug-fixed in recent rounds (CAG for being too rare,
+  monsoon trough from a complete NaN failure), and combined were now
+  overproducing relative to other basins.
+- **Verified the shear fix's real effect directly**, not just trusted
+  the formula change: re-measured the exact same transect from the
+  original diagnosis. SW Atlantic improved from consistently hostile
+  (22-28kt) to favorable at 3 of 4 sampled times (as low as 5.9kt);
+  eastern MDR and subtropics both dropped meaningfully too, though not
+  uniformly below threshold at every sampled moment. Checked additional
+  seeds afterward and confirmed eastern MDR genesis is now reachable
+  (a season that previously showed zero across multiple seeds produced
+  one) — a real, verified improvement.
+- Full regression suite: healthy.
+
+### Honest note on remaining rarity
+
+SW Atlantic and general subtropical genesis are now environmentally
+possible (verified directly) but still read as rare rather than common
+in the specific seasons sampled here — no structural gap was found (no
+longitude restriction blocks the subtropical pathway from that region),
+so this looks like ordinary stochastic rarity rather than a remaining
+bug. If it still reads as too rare once observed over more seasons in
+practice, the next lever would be the subtropical/cutoff-low pathway's
+own trigger chance, not the shear field this round already fixed.
+
+## v7.4 (Tropical Easterly Jet, traveling upper-level anticyclones)
+
+- **Fixed eastern MDR shear direction being westerly instead of
+  easterly**: confirmed the bug directly first (`shearVecU` was
+  positive/westerly-dominant, up to +24kt, across the eastern MDR) —
+  the upper-level field had no strong wind of its own there, so the
+  shear vector ended up dominated by the lower-level trades instead.
+  Added a real Tropical Easterly Jet (TEJ) — the actual meteorological
+  feature responsible, tied to the African/Asian monsoon circulation.
+  First attempt (26kt) wasn't strong enough to flip the sign once
+  weighted by distance from its center — checked the actual component
+  magnitudes directly rather than guessing again, found the lower-level
+  trades there were a stronger easterly (-25kt) than my first TEJ
+  attempt, and raised it to 42kt. Verified directly: eastern MDR now
+  correctly reads easterly-dominant (-17 to -21kt) while the western
+  MDR correctly stays westerly-dominant (unaffected, as it should be —
+  the TEJ doesn't realistically reach that far west). Confirmed this
+  stayed direction-only: vector magnitude still exactly equals the
+  calibrated scalar shear.
+- **Added traveling upper-level anticyclones** that discharge over West
+  Africa and meander westward, providing genuine ventilation/outflow
+  support to any storm they pass near — distinct from the trough/ULL
+  "channel" mechanic (an anticyclone is divergent outflow support, not
+  a trough's baroclinic pull). Real mean-reverting meander in latitude,
+  not a fixed track, so different anticyclones plausibly take different
+  paths. Caught and fixed a real bug during verification: the initial
+  lifespan (12 days) times the drift rate only covered ~38° of travel —
+  not even far enough to reach the western MDR, let alone the
+  Caribbean. Raised it and confirmed directly afterward: an anticyclone
+  genuinely reached the Caribbean region (as far west as -86°) in a
+  real test run, while most still naturally decay over the open MDR
+  from meander variance alone, matching "can meander into the
+  Caribbean" rather than always doing so.
+- Full regression suite: healthy throughout both additions.
+
+## v7.5 (found and fixed the real cause of the Caribbean bias; further subtropical genesis boost)
+
+- **Found the actual mechanism forcing storms toward the Caribbean**:
+  measured first — a real season showed 92% of all storms passing
+  through the Caribbean at some point. Traced it to the boosted
+  meridional geostrophic scale from a few rounds back (added to fix
+  waves not curving WNW near the Antilles) being applied symmetrically
+  on both sides of the subtropical ridge. West of the ridge (near the
+  Antilles) it correctly produces the intended northward curvature — but
+  the identical boost, applied east of the ridge (the eastern/central
+  MDR), was creating a much stronger *southward* pull than intended
+  (steerV reading -1.1 to -1.6kt there), systematically preventing early
+  recurvature and driving eastern MDR-origin storms onto a low-latitude
+  track straight toward the Caribbean instead of the real mix of
+  recurves and Caribbean-bound tracks.
+- **Made the scale asymmetric** rather than reverting the whole boost —
+  full strength on the west (recurve) side where it was verified working
+  well, a much more modest scale on the east side. Verified directly:
+  eastern MDR southward pull dropped from -1.6/-1.1kt to -0.4/-0.2kt,
+  while the west-side reading stayed exactly unchanged (2.1kt, both
+  before and after). Re-measured actual storm behavior on the same seed
+  as the original diagnosis: Caribbean-passage rate dropped from 92% to
+  81%, and a second seed showed 64% with a 50% recurve rate for eastern
+  MDR-origin storms (up from 0%) — a real, verified improvement, though
+  Caribbean passage is still notably high and may benefit from further
+  tuning once observed over more seasons.
+- **Further increased subtropical genesis trigger chance** (doubled
+  both the trough and ULL rates): the existing rate had been drastically
+  cut years ago when the environment was producing ~27 subtropical
+  systems/season, but SST threshold, eligible latitude, and (this
+  session) the shear baseline have all been separately fixed to be more
+  favorable since then — meaning the trigger rate was very likely
+  calibrated against an environment that no longer exists. Verified a
+  genuine occurrence where a seed previously showed zero across multiple
+  rounds now produced one — real movement, though still below the
+  target 1-4/season range in the samples checked.
+- Full regression suite: healthy throughout.
+
+## v7.6 (added a genuine ridge-weakness mechanism for early recurves)
+
+- **Added a direct, explicit mechanism for early recurves** rather than
+  relying only on reduced southward bias: real early recurves happen
+  when there's an actual localized break in the subtropical ridge, not
+  just a generically weaker southward push. Added a dedicated,
+  independent noise field representing genuine ridge weakness — only
+  positive excursions contribute (a weakness is a bonus opportunity, not
+  an extra southward push when absent), applied specifically east of the
+  ridge center where an early-recurve setup is meaningful. Sized to
+  produce a real, substantial pulse when it fires, comparable to the
+  west-side curvature itself, not a token nudge.
+- Verified directly before trusting it: sampled a fixed eastern MDR
+  point over 150 days and confirmed genuine, occasionally-strong
+  northward pulses now occur (up to 4.1kt, versus essentially a hard
+  ceiling near zero before), on 34.8% of ticks — a real, meaningful
+  early-recurve opportunity, not just theoretical.
+- Re-measured actual storm behavior on both prior diagnostic seeds:
+  mixed but not negative results (one seed roughly flat at 80% Caribbean
+  -passage, the other improved from 64% to 57% with a recurve occurring
+  where none had before) — expected given this is inherently stochastic
+  (some seasons will hit more ridge-weakness events by chance than
+  others), and the underlying mechanism itself is confirmed working.
+- Full regression suite: healthy.
+
+## v7.7 (raised the westerly-onset latitude — storms now reach further poleward before recurving)
+
+- **Fixed the westerly steering transition happening too far south**:
+  at lat33, the old ramp already had storms experiencing ~36% westerly
+  influence ("mostly westerly" character), when real mid-latitude flow
+  doesn't become mostly westerly until closer to 40N. Raised the onset
+  latitude (28→32), moving the 50%-westerly point from ~35N to ~39N.
+  Verified the curve directly: 33N now reads only 7% westerly (down
+  from 36%), with the 50% point landing at 39N as intended.
+- **Verified the actual effect on a real storm track**, not just the
+  formula: a storm started at 28N previously would have recurved
+  sharply near 33N. With the fix, it instead progresses steadily
+  further north — reaching 38-41.6N by day 7.5-10.5 — and, still
+  carrying meaningful intensity (46-52kt, by then post-tropical), tracks
+  far enough east to approach Europe. Directly matches the requested
+  outcome of allowing more post-tropical impacts on the UK/France,
+  rather than being a theoretical hope from the formula change alone.
+- Full regression suite: healthy.
+
+## v7.8 (reduced unrealistic jet acceleration, strengthened trough-capture pull — Newfoundland still not confirmed reachable)
+
+- **Confirmed the exact cause of the extreme post-recurve acceleration**:
+  the jet streak boost (55kt) combined with the base jet speed (65kt)
+  and a 0.55 steering fraction could produce ~66kt of pure eastward
+  steering for a jet-embedded storm — directly confirmed by computing
+  the worst case. Reduced the streak boost (55→32) and the steering
+  fraction (0.55→0.28, in two steps after the first reduction still
+  wasn't enough — verified directly each time rather than assuming).
+- **Strengthened the trough-capture magnitude** (13→19) so a storm has
+  more ability to gain latitude relative to its eastward drift during
+  the critical 30-45N transit.
+- **Honest result**: despite both changes, my hand-built test geometries
+  still couldn't get a storm to reach Newfoundland's actual latitude
+  (47-51N) before being carried east past its longitude — the storm
+  consistently crosses -50W in the mid-to-upper 30s latitude instead.
+  This is a genuinely stubborn balance between multiple competing
+  steering components (base westerly onset, jet, trough capture) that
+  wasn't fully solved this round. What *is* confirmed: both changes are
+  real, defensible improvements to the underlying physics on their own
+  merits (the jet was producing an unrealistic worst case; the
+  capture strength was likely undersized for what it needs to
+  accomplish), and — critically — the Carolinas mechanism was
+  re-verified completely unaffected (identical landfall points under
+  the same NAO tests, before and after).
+- Full regression suite: healthy.
+
+### Honest assessment for next steps
+
+This needs a more careful, dedicated pass rather than continued ad-hoc
+constant tuning — likely either a more direct mechanism (e.g., an
+explicit "phasing" bonus when a storm's motion vector aligns well with
+a nearby trough's own translation, rather than relying on the general
+capture-radius pull) or accepting that Newfoundland impacts should
+remain a rare, hard-to-trigger outcome requiring an unusually favorable
+combination of factors rather than a reliably reachable one.
+
+## v7.9 (storm-storm interaction: Fujiwhara, outflow shear/absorption, genesis spacing; real storm feedback onto 500mb heights/steering; ridge-weakness chaining; widened Bermuda-Azores high variability)
+
+- **Fujiwhara effect, for real**: nearby live tropical cyclones now
+  mutually orbit their combined center cyclonically (Northern
+  Hemisphere), with the relatively weaker storm of the pair deflected
+  more than the stronger one — matching how real Fujiwhara interaction
+  behaves when two vortices aren't comparably matched. This is the
+  actual mechanism keeping two close TCs from just passing straight
+  through each other's paths; there's no hard "storms can't cross"
+  rule, because that isn't how the real effect works and a hard rule
+  would just be a collision box wearing a physics name.
+- **Outflow shear from a dominant neighbor**: a storm meaningfully
+  stronger than a nearby one (≥1.3x) now imposes real additional shear
+  on it, on top of ordinary environmental shear, falling off with
+  distance out to roughly the stronger storm's own outflow radius.
+  Comparably-matched storms mostly just orbit each other rather than
+  shearing one another — that asymmetry is intentional and matches how
+  real cases go.
+- **Absorption**: sustained (not instant) very-close proximity to a
+  much stronger system (≥1.8x, within ~2.2°, held for ~18 hours) now
+  genuinely ends the weaker storm's life as an independent circulation,
+  with a small one-time size bump to the survivor. Verified this
+  actually fires rather than just existing as dead code: 3 absorption
+  events across 4 simulated seasons — rare, as it should be, not a
+  routine outcome.
+- **Genesis spacing**: a new storm can no longer spin up within ~3.5° of
+  an already-active one, applied at all six genesis pathways (waves,
+  subtropical, natural ULLs, CAG, ITCZ roll-up, monsoon trough).
+  Verified directly: minimum observed genesis separation across two
+  simulated seasons was 3.79°, at or above the floor.
+- **Storm feedback onto the 500mb height field/steering — this used to
+  be fake.** There was already a storm-outflow visual (arrows on the
+  200mb overlay), but it was explicitly display-only and never touched
+  steering or shear — confirmed by reading the code, not assumed. Added
+  a genuinely separate mechanism: a storm's own anticyclonic outflow
+  now contributes a real Gaussian height bump to the shared
+  `upperHeight` field, scaled by intensity, which feeds the same
+  geostrophic-steering and shear-vector math every other height feature
+  (the high, troughs, extratropical lows) already uses. A strong
+  hurricane now measurably perturbs the ridge and the steering felt by
+  storms near it, rather than just drawing outflow arrows that meant
+  nothing physically.
+- **Ridge-weakness chaining**: previously, a ridge break was purely a
+  smooth, slowly-drifting noise field with no memory of having been
+  used. Now, when a live storm actually exploits a meaningful weakness
+  (recorded as an event with position/day/strength), that specific
+  break stays weaker than the ambient field for ~3.5 days within ~6° —
+  a trailing storm passing near the same spot in that window gets a
+  real extra shot at the same opening, representing the ridge genuinely
+  taking time to rebuild rather than resetting the instant one storm
+  clears the area.
+- **Bermuda-Azores high variability, measured before and after**: the
+  claim that it "doesn't fluctuate enough" was checked against the
+  actual running sim rather than taken on faith — over 2 seasons, the
+  high's latitude only ever ranged 25.1-34.1N (never reached a genuine
+  NE excursion like ~38N) and pressure only ranged 1022-1033mb, under
+  1023mb just 1.9% of the time. The root cause: latitude had *no*
+  independent day-to-day noise at all, only the NAO's persistent-regime
+  shift — so without an unusually strong +NAO stretch it structurally
+  couldn't reach a far-NE position regardless of how far the (separate)
+  longitude noise wandered. Added an independent latitude noise field,
+  and widened both the longitude and strength noise amplitudes. Re-measured
+  after the change, across 5 seeds: latitude now reaches 19.4-38.7N, and
+  pressure reaches 1019-1035mb (>1030mb 11.7% of the time, <1023mb
+  14.7% of the time) — the high still climatologically anchors near its
+  normal position/strength most of the time (mean lat 30.8N, mean
+  1026mb), it just now has real room to swing the way the actual
+  Azores-Bermuda high does, instead of a narrow band around the mean.
+- **New diagnostic tools**: `tools/high-survey.mjs` (position/strength
+  distribution over N seasons — this is what caught the "doesn't
+  fluctuate enough" claim being literally true, and confirmed the fix)
+  and `tools/fujiwhara-check.mjs` (confirms absorption events and
+  genesis-spacing enforcement actually fire in practice, not just in
+  code that never runs).
+- **Performance note**: the new per-cell storm-outflow and
+  ridge-weakness-chaining computations initially looked like they might
+  be adding real cost (a 6-season regression run needed longer than a
+  60s test budget) — checked against a from-scratch extraction of the
+  pre-change zip before concluding anything, and a single season ran at
+  effectively the same wall-clock time before and after (~41s vs.
+  ~43s). The 60s timeout was simply too tight for a 6-season run in
+  this environment, not a regression; still hoisted the storm-outflow
+  phase/intensity filtering and the ridge-weakness-chain loop to only
+  run where they can matter (has active storms / dHdLon < 0
+  respectively), since there was easy, correct-either-way headroom to
+  take there regardless.
+- Full regression suite re-run after all changes: headless sanity check,
+  recurve-check, RI/pressure calibration, RI/ERC check, and track-survey
+  all still produce sane values (see individual tool output for
+  specifics) — nothing above reads as having destabilized the existing
+  physics.
+
+### Honest scope note
+
+"Tropical cyclones shouldn't cross each other's path" is handled here
+as an emergent consequence of mutual Fujiwhara rotation and outflow
+shear at real interaction ranges, not as a literal path-intersection
+check — real storms *can* and occasionally do pass close by one
+another without merging, and a hard collision rule would produce less
+realistic behavior than the actual physics, not more. Similarly, the
+Azores-high widening was tuned to match the general *range* you
+described (an independent NE excursion, an independent SW/weak
+excursion, more excursions past 1030mb and into the low 1020s) rather
+than forcing your two specific example coordinates to co-occur — those
+were treated as illustrations of the range, per how you framed them,
+not as literal targets to hit simultaneously.
 
 ## Where to take it next
 

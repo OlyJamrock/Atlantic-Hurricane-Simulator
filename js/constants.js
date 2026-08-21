@@ -192,9 +192,9 @@ export const ENVIRONMENT = {
   sstArcticOffSeason: 1.0,     // value AT 70N, off season (near/below freezing)
   sstClimatologyMidLat: 45,    // the lat0->45N / 45N->70N segment boundary
   sstClimatologyMaxLat: 70,    // reference latitude for the arctic endpoint (kept explicit, not grid-derived)
-  sstWarmPoolBoost: 2.1,      // extra warmth over the Caribbean/Gulf lobe (peak Aug-Oct)
+  sstWarmPoolBoost: 3.0,      // extra warmth over the Caribbean/Gulf lobe (peak Aug-Oct) -- raised to better match the real Western Hemisphere Warm Pool's spatial extent/magnitude shown in reference climatology
   warmPoolLon: -80,
-  warmPoolWidth: 24,
+  warmPoolWidth: 35,           // widened so the warm pool's influence tapers more gradually eastward instead of nearly vanishing by ~50 degrees out
   warmPoolLatCenter: 21,       // centers the boost between the Caribbean and the Gulf, so both get it
   warmPoolLatWidth: 15,
   sstHotPocketAmp: 0.9,        // localized >31C pockets within the warm pool, varies year to year
@@ -206,8 +206,14 @@ export const ENVIRONMENT = {
   // stretches punctuate the mean, not just a flat "always green" baseline.
   shearBaseLowPeak: 10,
   shearBaseLowOffSeason: 17,
-  shearBaseHighPeak: 24,
-  shearBaseHighOffSeason: 40,
+  // Lowered from 24/40 -- the old peak value alone put the baseline at
+  // ~18kt by lat26 (before TUTT, ENSO, or any other term), leaving
+  // almost no room for the subtropics/SW Atlantic ("Bermuda Triangle")
+  // to ever actually dip below the 20kt genesis threshold, even during
+  // otherwise-favorable synoptic moments. Real subtropical shear varies
+  // enough to support genesis at times, not just structurally never.
+  shearBaseHighPeak: 19,
+  shearBaseHighOffSeason: 34,
   // Late-season (Oct-Dec) central/eastern MDR shear increase — see
   // environment.js for why this is a separate, asymmetric term rather
   // than relying on the general seasonal climatology above. Ramp starts
@@ -327,9 +333,9 @@ export const ENVIRONMENT = {
   jetSpeedKt: 65,
   jetNaoLatShiftDeg: 4,
   jetNaoSpeedCoeffKt: 14,
-  jetStreakBoostKt: 55,     // extra speed near a trough's exit region
+  jetStreakBoostKt: 32,     // reduced from 55 -- extra speed near a trough's exit region
   jetStreakRadiusDeg: 14,
-  jetSteeringFraction: 0.55, // how much of the jet actually steers an embedded storm (vs. pure display)
+  jetSteeringFraction: 0.28, // further reduced from 0.4 -- even at 0.4, a test storm crossed Newfoundland's longitude (-52) at only 36.6N, nowhere near the 47-51N needed; the eastward component was still overwhelming the northward trough-capture pull
 
   // Trough/cutoff-low "capture": once a storm gets within range of a
   // traveling trough, it gets pulled poleward and accelerated eastward
@@ -341,7 +347,7 @@ export const ENVIRONMENT = {
   // direction now comes from the actual rotated geometry (see
   // _troughCapture in storm.js), not a fixed "mostly north, some east"
   // split that applied no matter where the trough actually was.
-  troughCaptureMagKtPerStrength: 13,
+  troughCaptureMagKtPerStrength: 19,  // raised from 13 -- a storm needs to gain latitude fast enough relative to its eastward drift during the 30-45N transit to actually reach the Newfoundland/Atlantic Canada window before being carried too far east; confirmed via direct testing that 13 wasn't enough even after taming the jet's eastward contribution separately
   troughOutflowBoostRadiusDeg: 12,
   troughOutflowBoostMaxKt: 9,
 
@@ -351,8 +357,29 @@ export const ENVIRONMENT = {
   // the central subtropical Atlantic through peak season and is a major
   // reason MDR/subtropical shear isn't uniformly low even at climatological
   // peak favorability.
-  tuttLat: 20, tuttLon: -40, tuttWidth: 14,
-  tuttShearBoost: 11, tuttPeakDayOfYear: 220, tuttSeasonWidth: 55, tuttFloor: 0.25,
+  tuttLat: 20, tuttLon: -40, tuttWidth: 10,
+  tuttShearBoost: 8, tuttPeakDayOfYear: 220, tuttSeasonWidth: 45, tuttFloor: 0.08,
+  // Tropical Easterly Jet — real, strong, seasonal upper-level easterly
+  // flow tied to the African/Asian monsoon circulation, centered over
+  // the eastern tropical Atlantic/West Africa. Speed set well above
+  // typical low-level trade speeds so the resulting shear vector over
+  // the eastern MDR is genuinely easterly-dominated, matching real
+  // climatology, rather than ending up dominated by the lower layer.
+  tejLat: 10, tejLonCenter: -15, tejLonWidth: 22, tejLatWidth: 8,
+  tejSpeedKt: 42, tejPeakDayOfYear: 220, tejSeasonWidth: 50,
+  // Traveling upper-level anticyclones — see _updateUpperAnticyclones in
+  // environment.js.
+  anticycloneSpawnLat: 12,
+  anticycloneSpawnLon: -10,       // just off the West African coast
+  anticycloneLatJitterDeg: 5,
+  anticycloneIntervalDaysPeak: 7,       // one roughly every week during monsoon peak
+  anticycloneIntervalDaysOffSeason: 40, // much rarer off-season
+  anticycloneDriftDegPerDay: 3.2,       // westward drift
+  anticycloneMeanderDegPerDay: 0.9,     // meander amplitude (mean-reverting via sin, not a random walk that wanders unboundedly)
+  anticycloneNoiseLatDegPerDay: 0.6,    // additional genuine randomness on top of the meander
+  anticycloneMaxLifespanDays: 24,       // raised from 12 -- the old value times the drift rate only covered ~38 degrees of travel, which couldn't even reach the western MDR let alone the Caribbean (~75 degrees away); most will still decay/dissipate over the open MDR from the meander variance alone, but this actually allows the ones that don't to reach the Caribbean as intended
+  anticycloneRadiusDeg: 9,
+  anticycloneVentilationAidKt: 9,       // outflow/ventilation boost for a storm sitting right under one
   tuttEnsoCoeff: 0.3,  // per deg C of Nino 3.4 anomaly — El Nino strengthens/sustains the TUTT, La Nina weakens it
   // Upper-level lows: short-lived, localized shear pockets (episodic
   // passages of a cutoff low aloft) rather than smoothly-varying noise —
@@ -378,6 +405,39 @@ export const ENVIRONMENT = {
   // western periphery. V raised well above U specifically to fix that.
   steeringGeostrophicScaleU: 95,
   steeringGeostrophicScaleV: 200,
+  // East-side-of-ridge scale, much closer to the original pre-boost
+  // value — see the note at the geoV call site in environment.js for
+  // why the boosted value can't be applied symmetrically.
+  steeringGeostrophicScaleVEastSide: 85,
+  // Ridge-weakness pulse (see the geoV call site in environment.js) —
+  // occasional, genuine early-recurve opportunity for eastern/central
+  // MDR systems. Amplitude sized to be a real, substantial northward
+  // pulse when it fires (comparable to the west-side curvature itself),
+  // not a token nudge — early recurves are a real but not-constant
+  // occurrence, matching how this should feel.
+  ridgeWeaknessDriftDegPerDay: 1.4,
+  ridgeWeaknessMaxKt: 5.5,
+  // Ridge-weakness "chaining": a real break the ridge takes real time to
+  // rebuild from — once one storm has genuinely exploited a weakness
+  // (see Environment.ridgeWeaknessEvents / _ridgeWeaknessNoiseValueAt), a
+  // trailing storm passing near that same spot within this window gets an
+  // extra decaying shot at the same opening, rather than the ridge always
+  // having silently re-formed by the time a following storm arrives.
+  ridgeWeaknessEventThreshold: 0.5,   // raw noise value (~[-1,1]) that counts as "genuinely exploited", not routine texture
+  ridgeWeaknessChainDays: 3.5,
+  ridgeWeaknessChainRadiusDeg: 6,
+  // Storm-induced upper-level ridging: a real, and previously only
+  // visual, feature of organized TC outflow — strong anticyclonic
+  // divergence aloft genuinely raises 500mb heights around/downstream of
+  // a storm, which in turn perturbs the geostrophic steering (and, via
+  // the shared upperHeight field, the shear) nearby storms actually feel.
+  // Radius formula matches the pre-existing (visual-only) outflow display
+  // in environment.js so the two stay physically consistent with each
+  // other.
+  stormOutflowRadiusBaseDeg: 6,
+  stormOutflowRadiusPerKt: 22,
+  stormOutflowHeightPerKt: 0.0068,  // a 130kt major reaches roughly the same peak height contribution as a moderate ridge cell
+  stormOutflowMaxHeight: 0.85,
   // Trade wind speed varies seasonally — genuinely faster early season,
   // relaxing through peak season (a real contributor to why peak-season
   // storms can slow down and intensify more when they do get a window),
@@ -388,8 +448,8 @@ export const ENVIRONMENT = {
   tradeEasterlyPeakSeasonKt: 15,    // ~early September, the seasonal minimum
   tradeEasterlyLateSeasonKt: 17,    // ~November, partial recovery
   tradeSeasonTroughDay: 248,
-  westerlyOnsetLat: 28,        // where trade easterlies start giving way to mid-latitude westerlies
-  westerlyRampWidthDeg: 14,    // fully westerly by roughly westerlyOnsetLat + this
+  westerlyOnsetLat: 32,        // raised from 28 -- real mid-latitude flow doesn't become mostly westerly until closer to 40N, not 33N; this puts the 50%-westerly point at ~39N instead of ~35N
+  westerlyRampWidthDeg: 14,    // fully westerly by roughly westerlyOnsetLat + this (~46N)
   midLatWesterlyKt: 22,        // realistic mid-latitude prevailing westerly steering speed
   // Western Caribbean/Bay of Campeche steering "dead zone" — real climo,
   // and the mechanism that lets a lingering storm there blow up.
@@ -433,9 +493,49 @@ export const ENVIRONMENT = {
   // Slow, non-tropical "pattern noise" perturbing the high's position and
   // strength day to day — stands in for transient ridging/troughing from
   // the mid-latitude flow that isn't captured by the smooth seasonal blend.
+  // Measured directly (tools/high-survey.mjs) before widening these:
+  // across 2 simulated seasons the high's latitude only ever ranged
+  // 25.1-34.1N and pressure only 1022-1033mb (<1023mb just 1.9% of the
+  // time) — real Azores-Bermuda high excursions go further both ways
+  // (as far NE as ~38N/27W, as far south/weak as ~28N/44W in the low
+  // 1020s, and occasionally past 1030mb) than that range covers.
+  // Latitude previously had NO independent day-to-day wobble at all —
+  // only the NAO's persistent-regime shift (naoHighLatShiftDeg) moved it
+  // — which is what kept it from ever reaching the NE excursion example
+  // regardless of how far NAO or the longitude noise moved separately.
   patternNoiseDegPerDay: 0.6,
-  patternNoiseLonAmpDeg: 9,
-  patternNoiseStrengthAmp: 0.22,
+  patternNoiseLonAmpDeg: 10,
+  patternNoiseLatAmpDeg: 7,
+  patternNoiseStrengthAmp: 0.34,
+};
+
+// Fujiwhara interaction between two live tropical cyclones, plus the
+// related "a dominant storm's outflow shears/absorbs a nearby weaker one"
+// mechanics. Kept as its own block (not folded into STORM) since these are
+// inherently storm-pair effects, not single-storm physics.
+export const FUJIWHARA = {
+  // Real Fujiwhara interaction becomes noticeable within roughly 750-1400km
+  // separation; ~8 degrees (~890km at these latitudes) is a reasonable
+  // basin-scale stand-in given the grid's 1-degree resolution.
+  interactionRadiusDeg: 8,
+  // Max mutual-orbit contribution to motion (kt) at zero separation and
+  // full combined intensity — scaled down by both proximity and combined
+  // strength inside _fujiwharaInteraction, so this is a ceiling, not a
+  // typical value.
+  orbitMagKt: 22,
+  // A neighbor has to be at least this many times stronger before its
+  // outflow is treated as genuinely dominant/shearing (comparable-strength
+  // pairs mostly just orbit each other, per real Fujiwhara cases).
+  outflowDominanceRatio: 1.3,
+  outflowBaseRadiusDeg: 3.5,
+  outflowShearMaxKt: 9,
+  // Absorption: real, but only at sustained very-close range against a
+  // meaningfully stronger system — not a hair-trigger merge the instant
+  // two circulations' outer wind fields touch.
+  absorptionRadiusDeg: 2.2,
+  absorptionDominanceRatio: 1.8,
+  absorptionDays: 0.75,
+  absorptionSizeBoost: 1.06, // modest, one-time size bump to the surviving storm
 };
 
 // Interactive per-storm track "wobble" — a mean-reverting random
@@ -455,8 +555,8 @@ export const TRACK_WOBBLE = {
 // cyclone — a real and fairly common Atlantic genesis pathway, especially
 // in the shoulder months.
 export const SUBTROPICAL = {
-  chancePerTroughPerTick: 0.0008,  // drastically reduced — was producing ~27 subtropical systems/season on average, real climatology is more like 1-4
-  chancePerUllPerTick: 0.0015,
+  chancePerTroughPerTick: 0.0016,  // doubled from 0.0008 -- that value was calibrated against a much less favorable environment (SST threshold, eligible latitude, and now shear have all been separately fixed to be more favorable since), so the effective production rate had likely fallen well below the original 1-4/season target
+  chancePerUllPerTick: 0.0028,     // similarly doubled from 0.0015
   ensoGenesisCoeff: 0.35,  // per deg C of Nino 3.4 anomaly — El Nino favors the subtropical pathway over MDR/Caribbean genesis
   minSst: 20.0,          // lowered from 22.5 -- the SST climatology fix (cooling the 28-45N zone to stop storms holding major intensity that far north) also made this threshold fail too often near the northern end of the trough-eligible zone, which is where subtropical genesis mostly happens; subtropical systems draw some baroclinic energy too, so tolerating cooler water than a pure warm-core system needs is physically correct anyway
   maxShear: 26,
@@ -478,6 +578,12 @@ export const SUBTROPICAL = {
 };
 
 export const GENESIS = {
+  // Real tropical cyclogenesis is suppressed right next to an existing
+  // circulation (subsidence/outflow from an already-organized system) —
+  // this is a hard floor against genesis essentially on top of another
+  // storm, on top of (not instead of) the gradual, physical suppression
+  // a storm's own outflow now imposes on the shared shear field.
+  minGenesisSeparationDeg: 3.5,
   waveIntervalDaysPeak: 5.6,
   waveIntervalDaysOffSeason: 15.0,
   // ITCZ proximity gives a modest baseline genesis boost (a genuinely
@@ -506,7 +612,7 @@ export const GENESIS = {
   // (Geometry/variability constants themselves live in ENVIRONMENT, not
   // here — see the note there for why.)
   monsoonTroughGpiBoost: 0.14,
-  monsoonTroughRollupChancePerTick: 0.0034,
+  monsoonTroughRollupChancePerTick: 0.0026,  // reduced from 0.0034 -- see the CAG chancePerTick note; both Caribbean-region pathways were combining to overproduce
   // Absolute wave-source longitude — near the real West African coast
   // where easterly waves actually emerge. Kept explicit (not a fraction
   // of the grid's span) for the same reason as the other longitude
@@ -533,10 +639,24 @@ export const GENESIS = {
   // waveRecurveLatStart to +waveRecurveLatRamp) for recurvature to be
   // physically plausible at all.
   waveNaoRecurveCoeffKt: 5.5,
+  // How much a wave's genesis potential is penalized by recent land
+  // exposure (see genesisPotential's landDisruption parameter), and how
+  // fast that exposure accumulates/decays as it crosses/clears land.
+  landDisruptionGpiPenalty: 0.85,   // at full disruption (1.0), GPI is cut by this fraction
+  landDisruptionAccumPerDay: 0.6,   // ~1.7 days of continuous land exposure to reach full disruption
+  landDisruptionRecoveryPerDay: 0.25, // slower to recover than to disrupt -- real structural damage doesn't heal as fast as it happens
   waveRecurveLatStart: 14,
   waveRecurveLatRamp: 10,
-  waveLatJitterDeg: 7.5,
-  waveBaseLat: 13,
+  waveLatJitterDeg: 7.5, // retained for reference/back-compat; peak-season jitter now driven by wavePeakSeasonJitterDeg below
+  waveBaseLat: 13, // now specifically the peak-season (Aug-Sep) mean latitude
+  // Full seasonal wave-latitude structure: low riders early season,
+  // wider spread (not just a higher mean) by peak season, letting both
+  // higher-latitude emergence and low riders happen side by side.
+  waveEarlySeasonBaseLat: 9,
+  waveEarlySeasonJitterDeg: 4.5,
+  wavePeakSeasonJitterDeg: 10.5,
+  waveEarlySeasonRampStartDoy: 152, // ~Jun 1
+  waveEarlySeasonRampEndDoy: 253,   // ~Sep 10, the climatological season peak (SEASON.peakDayOfYear)
   // Late-season spawn latitude shifts south as the eastern MDR shear
   // increase (see lateSeasonMdrShearBoostKt) makes higher-latitude
   // development progressively less likely — real late-season MDR
@@ -548,6 +668,14 @@ export const GENESIS = {
   waveLateSeasonBaseLat: 9,            // where the base latitude ends up once fully shifted
   gpiThreshold: 0.72,
   gpiCheckChancePerTick: 0.14,
+  // Crossing the GPI threshold used to guarantee immediate genesis —
+  // effectively "if a wave ever briefly touches favorable conditions
+  // once, it becomes a storm," which was producing too many successful
+  // waves. Now a genuine stochastic success gate on top of crossing the
+  // threshold.
+  genesisSuccessBaseChance: 0.15,   // chance right at the threshold
+  genesisSuccessMarginCoeff: 3.0,   // how fast success chance climbs as GPI exceeds the threshold
+  maxGenesisSuccessChance: 0.9,     // capped below certainty even at the most favorable conditions
   minSstForGenesis: 26.0,
   maxShearForGenesis: 20,
   // MDR (open-Atlantic easterly wave) genesis tails off later in the
@@ -640,7 +768,7 @@ export const STORM = {
   // weakening tropical cyclone's pressure recovers close behind its wind
   // loss, not on the same multi-day timescale RI intensification does.
   pressureLagHalfLifeDaysWeakening: 0.22,
-  weakenShearFactor: 2.1,
+  weakenShearFactor: 2.5,  // raised from 2.1 -- measured only ~17% of dissipations happening over open water (vs land/absorption) in a real season; the mechanism itself works under forced sustained hostile shear, but storms weren't reliably accumulating enough sustained penalty naturally
   ventilationShearOffsetCoeff: 0.85, // per kt of trough/outflow ventilation aid — how much marginal shear it can offset
   shearToleranceKt: 18,
   dryAirWeakenFactor: 24,
@@ -787,7 +915,7 @@ export const CAG = {
   peak2DayOfYear: 288,   // ~Oct 15 — shifted/sharpened for a real "jump" right around Oct 1
   peak2Width: 19,
   peak2Amplitude: 1.35,  // the real "huge jump" — late-season Caribbean activity noticeably outweighs the May-Jun window
-  chancePerTick: 0.0085,  // raised from 0.0062 -- shear threshold was already loosened once for this same complaint (see maxShear note below), but frequency still reads low; this round tries the other lever and verifies the actual resulting rate directly rather than assuming
+  chancePerTick: 0.0072,  // reduced from 0.0085 -- combined with the monsoon trough's own recent NaN-bug fix (which took it from effectively 0% to its full intended rate), the two Caribbean-region pathways together were overproducing relative to other basins
   latMin: 11, latMax: 20,
   lonMin: -95, lonMax: -80,
   minSst: 27.0,

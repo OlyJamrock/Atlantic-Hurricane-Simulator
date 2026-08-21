@@ -145,11 +145,6 @@ export class UI {
           btn.classList.toggle('active', this.renderer.showSwath);
           return;
         }
-        if (tool === 'cagZone') {
-          this.renderer.showCagZone = !this.renderer.showCagZone;
-          btn.classList.toggle('active', this.renderer.showCagZone);
-          return;
-        }
         if (tool === 'fronts') {
           this.renderer.showFronts = !this.renderer.showFronts;
           btn.classList.toggle('active', this.renderer.showFronts);
@@ -217,7 +212,7 @@ export class UI {
         }
         this.activeTool = this.activeTool === tool ? 'none' : tool;
         document.querySelectorAll('#toolToggle button[data-tool]').forEach((b) => {
-          if (['tracks', 'outlook', 'forecast', 'forecastAll', 'spaghetti', 'swath', 'seasonSummary', 'windHistory', 'cagZone', 'fronts', 'itcz', 'monsoonTrough', 'mapWind', 'mapPressure'].includes(b.dataset.tool)) return;
+          if (['tracks', 'outlook', 'forecast', 'forecastAll', 'spaghetti', 'swath', 'seasonSummary', 'windHistory', 'fronts', 'itcz', 'monsoonTrough', 'mapWind', 'mapPressure'].includes(b.dataset.tool)) return;
           b.classList.toggle('active', b.dataset.tool === this.activeTool);
         });
         if (this.activeTool === 'none') {
@@ -257,7 +252,7 @@ export class UI {
           b.classList.toggle('active', ('spawn:' + b.dataset.spawn) === this.activeTool);
         });
         document.querySelectorAll('#toolToggle button[data-tool]').forEach((b) => {
-          if (['tracks', 'outlook', 'forecast', 'forecastAll', 'spaghetti', 'swath', 'seasonSummary', 'windHistory', 'cagZone', 'fronts', 'itcz', 'monsoonTrough', 'mapWind', 'mapPressure'].includes(b.dataset.tool)) return;
+          if (['tracks', 'outlook', 'forecast', 'forecastAll', 'spaghetti', 'swath', 'seasonSummary', 'windHistory', 'fronts', 'itcz', 'monsoonTrough', 'mapWind', 'mapPressure'].includes(b.dataset.tool)) return;
           b.classList.toggle('active', b.dataset.tool === this.activeTool);
         });
         const spawnStatusLabel = document.getElementById('spawnStatusLabel');

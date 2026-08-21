@@ -24,6 +24,9 @@ import { windToPressureMb } from './scale.js';
 
 const idx = (iLat, iLon) => iLat * GRID.nLon + iLon;
 const lerp = (a, b, t) => a + (b - a) * t;
+// Shared zero-contribution object for grid cells with no active storms
+// nearby to sample — avoids allocating a fresh {h:0,...} per cell.
+const ZERO_GRAD = Object.freeze({ h: 0, dHdLon: 0, dHdLat: 0 });
 
 export class Environment {
   constructor(oscillations, seed = 1) {
@@ -75,9 +78,24 @@ export class Environment {
     // speed up or slow down the flow in one direction.
     this._steerNoiseU = new NoiseField({ width: 16, height: 8, seed: seed + 11 });
     this._steerNoiseV = new NoiseField({ width: 16, height: 8, seed: seed + 17 });
+    // Ridge-weakness noise: a real, localized break in the subtropical
+    // ridge (distinct from the ridge's own slow position/strength
+    // wobble) can let an eastern/central MDR system escape poleward
+    // early — a genuine early recurve, not just "less southward pull
+    // than before." Independent field so this reads as its own
+    // synoptic-scale feature, not tied to the general steering noise.
+    this._ridgeWeaknessNoise = new NoiseField({ width: 14, height: 6, seed: seed + 31 });
     this._dryNoise = new NoiseField({ width: 10, height: 6, seed: seed + 2 });
     this._patternNoiseLon = new NoiseField({ width: 8, height: 1, seed: seed + 3, wrapX: false });
     this._patternNoiseStr = new NoiseField({ width: 8, height: 1, seed: seed + 4, wrapX: false });
+    // Independent latitude wobble for the high — previously the high's
+    // latitude only ever moved via the NAO's persistent-regime shift, so
+    // without a genuine +NAO regime it could never reach a real far-NE
+    // excursion (e.g. ~38N/27W) regardless of how far the (separate)
+    // longitude noise wandered. Own noise field/seed so it varies
+    // independently of the longitude and strength wobbles, not a scaled
+    // copy of either.
+    this._patternNoiseLat = new NoiseField({ width: 8, height: 1, seed: seed + 41, wrapX: false });
     // Caribbean monsoon trough — its own noise, independent of the
     // ridge's pattern above: real day-to-day/week-to-week variability
     // (it weakens, strengthens, shifts, and can temporarily disappear
@@ -107,6 +125,13 @@ export class Environment {
     // decaying, user-placed Gaussian bumps in the same height field the
     // simulation's own Bermuda high/troughs use.
     this.userFeatures = [];
+    // Real, if localized, breaks in the subtropical ridge that a storm
+    // has actually exploited (see _ridgeWeaknessNoiseValueAt / the
+    // recording loop in update()) — a following storm passing near the
+    // same spot within RidgeWeaknessChainDays gets an extra shot at the
+    // same opening, since the ridge takes real time to rebuild, not just
+    // whatever the smooth drifting noise field alone would give it.
+    this.ridgeWeaknessEvents = []; // [{lat, lon, day, strength}]
     // Independent per-cell noise (lattice matches grid resolution exactly,
     // sampled at integer positions — i.e. no smoothing between cells) to
     // give SST isotherms the jagged, fine-scale texture real satellite SST
@@ -141,6 +166,15 @@ export class Environment {
 
     this.highCenter = { lat: ENV.highLat, lon: ENV.highLonPeak, strength: 1 };
     this.troughCenters = [];
+    // Traveling upper-level anticyclones — real features that discharge
+    // over West Africa (tied to the same monsoon circulation the TEJ
+    // above comes from) and can meander westward, sometimes reaching as
+    // far as the Caribbean, providing genuine upper-level ventilation
+    // support to any developing system they pass near. Distinct from
+    // the semi-permanent TUTT (a shear *source*) — this is a discrete,
+    // traveling feature that's a ventilation *aid*.
+    this.upperAnticyclones = [];
+    this._lastAnticycloneSpawnDay = -999;
     this.ensoIndex = 0;
 
     this._buildSstClimatology();
@@ -204,7 +238,11 @@ export class Environment {
     const u = (dayNum * ENV.patternNoiseDegPerDay * 0.02) % this._patternNoiseLon.w;
     const lonNudge = this._patternNoiseLon.sample(u, 0) * ENV.patternNoiseLonAmpDeg;
     const strNudge = this._patternNoiseStr.sample((u * 1.3) % this._patternNoiseStr.w, 0) * ENV.patternNoiseStrengthAmp;
-    return { lonNudge, strNudge };
+    // Own phase offset (not a scaled reuse of u) so the latitude wobble
+    // doesn't move in lockstep with the longitude one — a real "shifted
+    // NE" excursion needs both to be able to peak independently.
+    const latNudge = this._patternNoiseLat.sample((u * 0.77 + 2.1) % this._patternNoiseLat.w, 0) * ENV.patternNoiseLatAmpDeg;
+    return { lonNudge, strNudge, latNudge };
   }
 
   // Returns { h, dHdLon, dHdLat } — value and analytic gradient in one
@@ -215,7 +253,7 @@ export class Environment {
   _highFieldWithGrad(lat, lon, seasonal, pattern, nao) {
     const lonNow = lerp(ENV.highLonOffSeason, ENV.highLonPeak, seasonal) +
       pattern.lonNudge - nao * OSC.naoHighLonShiftDeg;
-    const latNow = ENV.highLat + nao * OSC.naoHighLatShiftDeg;
+    const latNow = ENV.highLat + nao * OSC.naoHighLatShiftDeg + pattern.latNudge;
     const strength = Math.max(
       0.1,
       lerp(ENV.highStrengthOffSeason, ENV.highStrengthPeak, seasonal) +
@@ -233,6 +271,43 @@ export class Environment {
   // latitude wander, sampled from different offsets of a shared noise
   // field, so the mid-latitude pattern doesn't feel like a fixed
   // metronome — troughs strengthen, weaken, and wander independently.
+  // Traveling upper-level anticyclones: spawn periodically over West
+  // Africa (tied to the same monsoon-season timing as the TEJ), drift
+  // westward with real meandering (a genuine random walk in latitude,
+  // not just a fixed track), and expire after a real but bounded
+  // lifespan or once they drift out of the basin. Some will realistically
+  // die out over the open MDR; others can genuinely meander far enough
+  // west to reach the Caribbean, matching how these actually behave.
+  _updateUpperAnticyclones(dayNum, dtDays, rand) {
+    const doy = dayNum % 365;
+    const seasonalDist = Math.abs(doy - ENV.tejPeakDayOfYear);
+    const seasonal = Math.exp(-0.5 * Math.pow(seasonalDist / ENV.tejSeasonWidth, 2));
+    const interval = ENV.anticycloneIntervalDaysOffSeason -
+      (ENV.anticycloneIntervalDaysOffSeason - ENV.anticycloneIntervalDaysPeak) * seasonal;
+    if (dtDays > 0 && dayNum - this._lastAnticycloneSpawnDay >= interval) {
+      this.upperAnticyclones.push({
+        lat: ENV.anticycloneSpawnLat + (rand() - 0.5) * 2 * ENV.anticycloneLatJitterDeg,
+        lon: ENV.anticycloneSpawnLon,
+        ageDays: 0,
+        wobbleSeed: rand() * 1000,
+      });
+      this._lastAnticycloneSpawnDay = dayNum;
+    }
+    for (const a of this.upperAnticyclones) {
+      a.ageDays += dtDays;
+      // Genuine meander: mean-reverting random walk in latitude (not a
+      // fixed track), so different anticyclones plausibly take
+      // different paths — some stay put over the open MDR, others
+      // drift far enough north/west to reach the Caribbean.
+      const wobble = Math.sin(a.wobbleSeed + a.ageDays * 0.7) * ENV.anticycloneMeanderDegPerDay;
+      a.lat += wobble * dtDays + (rand() - 0.5) * ENV.anticycloneNoiseLatDegPerDay * dtDays;
+      a.lon -= ENV.anticycloneDriftDegPerDay * dtDays;
+    }
+    this.upperAnticyclones = this.upperAnticyclones.filter(
+      (a) => a.ageDays < ENV.anticycloneMaxLifespanDays && a.lon > GRID.lon0 - 5
+    );
+  }
+
   _troughNoiseFor(troughIndex, dayNum) {
     const u = (dayNum * ENV.troughNoiseDegPerDay * 0.05 + troughIndex * 3.7) % this._troughNoise.w;
     const strNudge = this._troughNoise.sample(u, troughIndex * 0.5) * ENV.troughStrengthNoiseAmp;
@@ -278,11 +353,18 @@ export class Environment {
   }
 
   update(dayNum, activeStorms = [], rand = Math.random) {
+    // Pre-filter once per tick rather than re-checking phase/intensity
+    // per grid cell per storm inside the hot loop below (grid is ~9.4k
+    // cells; this ran measurably slower before hoisting it out).
+    const outflowStorms = activeStorms.filter(
+      (s) => !s.dissipated && s.phase === 'tropical' && s.intensityKt >= 34
+    );
     // Decay the storm-induced wave-breaking shear wake. Computed from the
     // actual day gap since the last update (not a fixed tick assumption)
     // so this stays correct even for the history/rewind Environment
     // instance, which can jump by large or irregular day gaps.
     const dtSinceLast = this._lastUpdateDay == null ? 0 : Math.max(0, dayNum - this._lastUpdateDay);
+    this._updateUpperAnticyclones(dayNum, dtSinceLast, rand);
     // Accumulate the ULL drift offset using last tick's rate (itself
     // derived from the actual subtropical steering flow — see the
     // post-loop computation below) — an accumulated running offset, not
@@ -303,6 +385,11 @@ export class Environment {
     if (this.userFeatures.length) {
       this.userFeatures = this.userFeatures.filter(
         (f) => dayNum - f.spawnDay < SPAWN.featureLifetimeDays
+      );
+    }
+    if (this.ridgeWeaknessEvents.length) {
+      this.ridgeWeaknessEvents = this.ridgeWeaknessEvents.filter(
+        (ev) => dayNum - ev.day < ENV.ridgeWeaknessChainDays
       );
     }
     if (dtSinceLast > 0) {
@@ -357,6 +444,23 @@ export class Environment {
     };
     this.ensoIndex = ensoIdx;
     this.naoIndex = naoIdx;
+
+    // Ridge-weakness "chaining": if a live storm currently sits east of
+    // the ridge center where a weakness pulse would actually apply, and
+    // the drifting noise field there is genuinely favorable right now
+    // (not routine texture), record it — a trailing storm passing near
+    // this same spot within ridgeWeaknessChainDays gets an extra shot at
+    // the same opening below, since a real ridge break takes real time
+    // to rebuild rather than silently resetting the instant one storm
+    // clears the area.
+    for (const storm of activeStorms) {
+      if (storm.dissipated || storm.phase !== 'tropical') continue;
+      if (storm.lon <= this.highCenter.lon) continue; // only meaningful east of the ridge center
+      const val = this._ridgeWeaknessNoiseValueAt(storm.lat, storm.lon, dayNum);
+      if (val > ENV.ridgeWeaknessEventThreshold) {
+        this.ridgeWeaknessEvents.push({ lat: storm.lat, lon: storm.lon, day: dayNum, strength: val });
+      }
+    }
 
     for (let iLat = 0; iLat < GRID.nLat; iLat++) {
       const lat = this.latOf(iLat);
@@ -450,15 +554,16 @@ export class Environment {
         const fineVal = this._fineTextureNoise._at(iLon, iLat); // raw lattice value, no interpolation
         this.sstDisplay[i] = this.sst[i] + fineVal * 0.22;
 
-        // --- Upper-level height field: Bermuda high (+ pattern noise + NAO) + Icelandic Low (NAO's other half) + troughs + extratropical lows + user-spawned features
+        // --- Upper-level height field: Bermuda high (+ pattern noise + NAO) + Icelandic Low (NAO's other half) + troughs + extratropical lows + user-spawned features + storm-induced outflow ridging
         const highG = this._highFieldWithGrad(lat, lon, seasonal, pattern, naoIdx);
         const troughG = this._troughFieldWithGrad(lat, lon, dayNum);
         const etlowG = this._extratropicalLowContribution(lat, lon);
         const userG = this._userFeatureContribution(lat, lon, dayNum);
+        const stormG = outflowStorms.length ? this._stormOutflowFieldWithGrad(lat, lon, outflowStorms) : ZERO_GRAD;
         const dIceLat = lat - this.icelandicLow.lat, dIceLon = lon - this.icelandicLow.lon;
         const icelandicLowH = -this.icelandicLow.strength *
           Math.exp(-0.5 * (dIceLat * dIceLat + dIceLon * dIceLon) / (ENV.icelandicLowWidth * ENV.icelandicLowWidth));
-        const h = highG.h + troughG.h + etlowG.h + userG.h + icelandicLowH;
+        const h = highG.h + troughG.h + etlowG.h + userG.h + icelandicLowH + stormG.h;
         this.upperHeight[i] = Math.max(-1.4, Math.min(1.2, h));
 
         // --- Background/ambient MSLP: NOT the cause of subsidence/
@@ -630,8 +735,8 @@ export class Environment {
         // wind; the shear *vector* (for rendering arrows) is upper-minus-lower,
         // normalized and scaled to the scalar shear magnitude above so
         // arrows visually track the same field storms actually feel.
-        const dHdLon = highG.dHdLon + troughG.dHdLon + etlowG.dHdLon + userG.dHdLon;
-        const dHdLat = highG.dHdLat + troughG.dHdLat + etlowG.dHdLat + userG.dHdLat;
+        const dHdLon = highG.dHdLon + troughG.dHdLon + etlowG.dHdLon + userG.dHdLon + stormG.dHdLon;
+        const dHdLat = highG.dHdLat + troughG.dHdLat + etlowG.dHdLat + userG.dHdLat + stormG.dHdLat;
         // Separate zonal/meridional scales, not one shared factor — the
         // meridional (curving) component was far too weak on its own:
         // measured a wave transiting north of the Antilles barely
@@ -646,7 +751,51 @@ export class Environment {
         // over-amplifying the already-reasonable zonal push in the deep
         // tropics.
         const geoU = -dHdLat * ENV.steeringGeostrophicScaleU;
-        const geoV = dHdLon * ENV.steeringGeostrophicScaleV;
+        // Asymmetric meridional scale: the boosted value was tuned
+        // specifically for the west side of the ridge (dHdLon>0,
+        // northward pull — real WNW curvature approaching the Antilles/
+        // western Atlantic, verified working well there). Applied
+        // symmetrically, the same boost also created a much stronger
+        // *southward* pull on the ridge's east side (eastern MDR) than
+        // intended — confirmed directly (steerV reading -1.1 to -1.6kt
+        // there, versus the old, much milder ~-0.5 range) — which was
+        // systematically preventing early recurvature and driving
+        // eastern/central MDR-origin storms onto a low-latitude track
+        // straight toward the Caribbean instead of the real mix of
+        // early recurves and Caribbean-bound tracks that should occur.
+        // A real ridge weakness can still let an eastern MDR system
+        // escape north early; a strong, un-weakened ridge shouldn't be
+        // *artificially amplified* into forcing nearly all of them south.
+        const geoVScale = dHdLon >= 0 ? ENV.steeringGeostrophicScaleV : ENV.steeringGeostrophicScaleVEastSide;
+        // Ridge-weakness pulse: a real, localized break in the ridge
+        // (distinct from the ridge's own slow position/strength wobble)
+        // can let an eastern/central MDR system escape poleward early —
+        // a genuine early recurve opportunity, not just "reduced
+        // southward pull." Only positive noise excursions contribute (a
+        // weakness is a bonus chance, not an extra southward push when
+        // absent), and only applies east of the ridge center, where an
+        // early recurve setup is actually meaningful.
+        const rwU = ((lon - dayNum * ENV.ridgeWeaknessDriftDegPerDay - GRID.lon0) / (GRID.lon1 - GRID.lon0)) * this._ridgeWeaknessNoise.w;
+        const rwV = latFracFull * this._ridgeWeaknessNoise.h;
+        const ridgeWeaknessVal = Math.max(0, this._ridgeWeaknessNoise.sample(rwU, rwV));
+        // Chained bonus from a nearby, recent, already-exploited weakness
+        // (see the recording loop above) — the ridge hasn't had time to
+        // fully rebuild there yet, so a trailing storm gets a real extra
+        // opening on top of whatever the smooth drifting field alone
+        // gives it at this position/time.
+        let chainedWeakness = 0;
+        if (dHdLon < 0 && this.ridgeWeaknessEvents.length) {
+          for (const ev of this.ridgeWeaknessEvents) {
+            const age = dayNum - ev.day;
+            const dEv = Math.hypot(lat - ev.lat, lon - ev.lon);
+            if (dEv > ENV.ridgeWeaknessChainRadiusDeg) continue;
+            const ageFade = Math.max(0, 1 - age / ENV.ridgeWeaknessChainDays);
+            const distFade = 1 - dEv / ENV.ridgeWeaknessChainRadiusDeg;
+            chainedWeakness = Math.max(chainedWeakness, ev.strength * ageFade * distFade);
+          }
+        }
+        const ridgeWeaknessPulse = dHdLon < 0 ? (ridgeWeaknessVal + chainedWeakness) * ENV.ridgeWeaknessMaxKt : 0;
+        const geoV = dHdLon * geoVScale + ridgeWeaknessPulse;
 
         const tradeFalloff = Math.max(0, 1 - Math.pow(latFrac / 0.75, 1.6));
         // The western Caribbean/Bay of Campeche is a real steering "dead
@@ -713,6 +862,21 @@ export class Environment {
         // Upper wind ~ geostrophic (scaled up, that's the 200mb flow);
         // lower wind ~ trades. Shear vector = upper - lower.
         const upperU = geoU * 1.7, upperV = geoV * 1.7;
+        // Tropical Easterly Jet (TEJ): a real, strong, seasonal upper-
+        // level easterly flow tied to the African/Asian summer monsoon
+        // circulation, centered over the eastern tropical Atlantic/West
+        // Africa region. Without an explicit easterly contribution here,
+        // the upper-level field over the eastern MDR had no strong wind
+        // of its own — the shear vector there ended up dominated by the
+        // lower-level trades instead and pointed the wrong way
+        // (westerly-appearing) rather than the genuinely easterly-
+        // dominated shear this region actually has.
+        const tejSeasonalDist = Math.abs((dayNum % 365) - ENV.tejPeakDayOfYear);
+        const tejSeasonal = Math.exp(-0.5 * Math.pow(tejSeasonalDist / ENV.tejSeasonWidth, 2));
+        const tejDLon = (lon - ENV.tejLonCenter) / ENV.tejLonWidth;
+        const tejDLat = (lat - ENV.tejLat) / ENV.tejLatWidth;
+        const tejWeight = Math.exp(-0.5 * (tejDLon * tejDLon + tejDLat * tejDLat));
+        const tejU = -ENV.tejSpeedKt * tejSeasonal * tejWeight; // negative = easterly
         // Jet stream: visual-only addition to the 200mb display field —
         // a band of strong westerlies whose latitude/strength responds to
         // NAO, with streak boosts near troughs (real jet streaks intensify
@@ -744,11 +908,25 @@ export class Environment {
           outflowV += outflowMag * (dLatS / dist);
         }
 
-        this.upperWindU[i] = upperU + jetSpeed + outflowU;
+        this.upperWindU[i] = upperU + tejU + jetSpeed + outflowU;
         this.upperWindV[i] = upperV + outflowV;
         this.jetU[i] = jetSpeed;
-        const lowerU = tradeEasterly * 0.6, lowerV = 0.15;
-        let svU = upperU - lowerU, svV = upperV - lowerV;
+        // Shear vector direction: a real upper-minus-lower difference
+        // between the actual wind layers this simulation already builds,
+        // not a standalone approximation. Previously the "lower" side
+        // was a crude one-off (tradeEasterly*0.6, a fixed +0.15 V) that
+        // ignored the real, fully-built 850mb field (steer850U/V,
+        // computed just above — real noise, ridge coupling, southern-
+        // MDR stability tapering, all of it) entirely, and the "upper"
+        // side omitted the jet stream despite it being a major real-
+        // world shear contributor already computed right here. This is
+        // direction-only — the magnitude (this.shear[i]) still comes
+        // from the extensively-calibrated formula above; this just
+        // makes the vector it's applied along physically grounded in
+        // the same wind layers a real 850-200mb shear calculation uses,
+        // rather than an inconsistent standalone stand-in.
+        const lowerU = this.steer850U[i], lowerV = this.steer850V[i];
+        let svU = (upperU + tejU + jetSpeed) - lowerU, svV = upperV - lowerV;
         const svMag = Math.hypot(svU, svV) || 1;
         this.shearVecU[i] = (svU / svMag) * this.shear[i];
         this.shearVecV[i] = (svV / svMag) * this.shear[i];
@@ -953,6 +1131,40 @@ export class Environment {
   // and boosts shear — real cutoff-low behavior) or ridge ('high', boosts
   // steering and suppresses shear locally), decaying over
   // SPAWN.featureLifetimeDays.
+  // Raw ridge-weakness noise value (~[-1,1]) at a lat/lon — factored out
+  // so both the per-cell shear/steering computation in update() and the
+  // per-storm "did this storm actually exploit a weakness" check below
+  // sample the exact same drifting field.
+  _ridgeWeaknessNoiseValueAt(lat, lon, dayNum) {
+    const latFracFull = (lat - GRID.lat0) / (GRID.lat1 - GRID.lat0);
+    const rwU = ((lon - dayNum * ENV.ridgeWeaknessDriftDegPerDay - GRID.lon0) / (GRID.lon1 - GRID.lon0)) * this._ridgeWeaknessNoise.w;
+    const rwV = latFracFull * this._ridgeWeaknessNoise.h;
+    return this._ridgeWeaknessNoise.sample(rwU, rwV);
+  }
+
+  // Storm-induced upper-level ridging: a real anticyclonic height
+  // contribution from a storm's own outflow, distinct from the
+  // divergence-arrow display field below (upperWindU/V) — this one
+  // actually feeds the geostrophic steering/shear gradient other storms
+  // feel, the way real strong-TC outflow measurably perturbs the 500mb
+  // pattern around and downstream of it.
+  _stormOutflowFieldWithGrad(lat, lon, outflowStorms) {
+    let h = 0, dHdLon = 0, dHdLat = 0;
+    for (const storm of outflowStorms) {
+      const dLat = lat - storm.lat, dLon = lon - storm.lon;
+      const r2raw = dLat * dLat + dLon * dLon;
+      const radius = ENV.stormOutflowRadiusBaseDeg + storm.intensityKt / ENV.stormOutflowRadiusPerKt;
+      const R2 = radius * radius;
+      if (r2raw > R2 * 4) continue; // cheap cull well outside the bump
+      const strength = Math.min(ENV.stormOutflowMaxHeight, storm.intensityKt * ENV.stormOutflowHeightPerKt);
+      const hi = strength * Math.exp(-r2raw / (2 * R2));
+      h += hi;
+      dHdLon += -hi * dLon / R2;
+      dHdLat += -hi * dLat / R2;
+    }
+    return { h, dHdLon, dHdLat };
+  }
+
   spawnFeature(type, lat, lon, dayNum) {
     const strength = type === 'low' ? SPAWN.upperLowStrength : SPAWN.ridgeStrength;
     const radius = type === 'low' ? SPAWN.upperLowRadiusDeg : SPAWN.ridgeRadiusDeg;

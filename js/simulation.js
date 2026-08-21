@@ -39,6 +39,24 @@ const EPAC_COAST_SEGMENTS = [
   { latMin: 13.0, latMax: 14.5, lonMin: -92, lonMax: -87.5 }, // El Salvador / Guatemala south
   { latMin: 14.5, latMax: 18, lonMin: -99, lonMax: -90 },   // Guatemala north / Mexico (Chiapas-Oaxaca-Guerrero)
 ];
+// Real tropical cyclogenesis is suppressed near an existing circulation —
+// subsidence/outflow from an already-organized system makes the immediate
+// area genuinely hostile to a second system spinning up right next to it
+// or directly astride its track, which is also why storms so rarely form
+// shoulder-to-shoulder rather than with real spacing between them. This is
+// on top of (not instead of) the physical shear a storm's own outflow now
+// imposes on the shared environment (see environment.js) — that handles
+// the broader, gradual suppression; this is a hard floor against genesis
+// essentially on top of an existing system.
+function tooCloseToExistingStorm(lat, lon, storms) {
+  for (const storm of storms) {
+    if (storm.dissipated) continue;
+    const d = Math.hypot(storm.lat - lat, storm.lon - lon);
+    if (d < GEN.minGenesisSeparationDeg) return true;
+  }
+  return false;
+}
+
 function isEasternPacificPosition(lat, lon) {
   if (lon < SUB.minGenesisLon) return true;
   for (const seg of EPAC_COAST_SEGMENTS) {
@@ -94,20 +112,33 @@ export class World {
       if (wave.spawned) continue;
       if (isEasternPacificPosition(wave.lat, wave.lon)) continue; // drifted into genuine Eastern Pacific territory (general boundary or the Panama/Costa Rica curve)
       if (this.rand() > GEN.gpiCheckChancePerTick) continue;
-      const gpi = genesisPotential(this.env, this.osc, wave.lat, wave.lon, this.dayNum);
+      const gpi = genesisPotential(this.env, this.osc, wave.lat, wave.lon, this.dayNum, wave.landDisruption);
       // +AMO effectively lowers the genesis bar (more storms get over the
       // line); -AMO raises it — on top of AMO's separate SST effect.
       const effectiveThreshold = GEN.gpiThreshold - this.osc.amoIndex * AMO.genesisThresholdShift;
       if (gpi >= effectiveThreshold) {
-        const storm = new Storm({
-          lat: wave.lat,
-          lon: wave.lon,
-          number: this.numberer.next(Math.floor(this.dayNum / 365)),
-          bornDay: this.dayNum,
-          rand: this.rand,
-        });
-        this.storms.push(storm);
-        wave.spawned = true;
+        // Crossing the threshold doesn't guarantee genesis on the spot —
+        // real tropical cyclogenesis has meaningful internal-dynamics
+        // uncertainty a GPI-style index alone can't capture; even
+        // genuinely favorable-looking disturbances often fail to
+        // organize. Success chance scales with how far GPI exceeds the
+        // threshold (comfortably favorable conditions succeed more
+        // reliably than marginal ones), capped below certainty even at
+        // the best conditions.
+        const margin = gpi - effectiveThreshold;
+        const successChance = Math.min(GEN.maxGenesisSuccessChance,
+          GEN.genesisSuccessBaseChance + margin * GEN.genesisSuccessMarginCoeff);
+        if (this.rand() < successChance && !tooCloseToExistingStorm(wave.lat, wave.lon, this.storms)) {
+          const storm = new Storm({
+            lat: wave.lat,
+            lon: wave.lon,
+            number: this.numberer.next(Math.floor(this.dayNum / 365)),
+            bornDay: this.dayNum,
+            rand: this.rand,
+          });
+          this.storms.push(storm);
+          wave.spawned = true;
+        }
       }
     }
 
@@ -128,6 +159,7 @@ export class World {
       if (s.land > 0.3) continue;
       if (s.sst < SUB.minSst) continue;
       if (s.shear > SUB.maxShear) continue;
+      if (tooCloseToExistingStorm(center.lat, center.lon, this.storms)) continue;
       const storm = new Storm({
         lat: center.lat,
         lon: center.lon,
@@ -152,6 +184,7 @@ export class World {
       const s = this.env.stateAt(ull.lat, ull.lon);
       if (s.land > 0.3) continue;
       if (s.sst < SUB.minSst) continue;
+      if (tooCloseToExistingStorm(ull.lat, ull.lon, this.storms)) continue;
       const storm = new Storm({
         lat: ull.lat,
         lon: ull.lon,
@@ -180,7 +213,7 @@ export class World {
         const lat = CAG.latMin + this.rand() * (CAG.latMax - CAG.latMin);
         const lon = CAG.lonMin + this.rand() * (CAG.lonMax - CAG.lonMin);
         const s = this.env.stateAt(lat, lon);
-        if (s.land < 0.3 && s.sst >= CAG.minSst && s.shear <= CAG.maxShear) {
+        if (s.land < 0.3 && s.sst >= CAG.minSst && s.shear <= CAG.maxShear && !tooCloseToExistingStorm(lat, lon, this.storms)) {
           // Early (May-Jun) vs late (Oct+) season biases the outcome —
           // real climatology: early Gulf/Caribbean systems skew short-
           // lived/weak, late-season Caribbean systems that get going have
@@ -226,7 +259,7 @@ export class World {
         const lon = GEN.itczRollupLonMin + this.rand() * (GEN.itczRollupLonMax - GEN.itczRollupLonMin);
         if (!isEasternPacificPosition(lat, lon)) {
           const s = this.env.stateAt(lat, lon);
-          if (s.land < 0.3 && s.sst >= GEN.minSstForGenesis && s.shear <= GEN.maxShearForGenesis) {
+          if (s.land < 0.3 && s.sst >= GEN.minSstForGenesis && s.shear <= GEN.maxShearForGenesis && !tooCloseToExistingStorm(lat, lon, this.storms)) {
             const storm = new Storm({
               lat, lon,
               number: this.numberer.next(Math.floor(this.dayNum / 365)),
@@ -251,7 +284,7 @@ export class World {
         const lat = geo.latCenter + (this.rand() - 0.5) * 2 * geo.latHalfExtent;
         const lon = geo.lonCenter + (this.rand() - 0.5) * 2 * geo.lonHalfExtent;
         const s = this.env.stateAt(lat, lon);
-        if (s.land < 0.3 && s.sst >= GEN.minSstForGenesis && s.shear <= GEN.maxShearForGenesis) {
+        if (s.land < 0.3 && s.sst >= GEN.minSstForGenesis && s.shear <= GEN.maxShearForGenesis && !tooCloseToExistingStorm(lat, lon, this.storms)) {
           const storm = new Storm({
             lat, lon,
             number: this.numberer.next(Math.floor(this.dayNum / 365)),
@@ -266,7 +299,7 @@ export class World {
     }
 
     for (const storm of this.storms) {
-      storm.step(this.env, this.osc, dtDays, this.dayNum, this.rand);
+      storm.step(this.env, this.osc, dtDays, this.dayNum, this.rand, this.storms);
       // Naming happens separately from numbering: a system keeps its "0XL"
       // designation for life unless/until it actually reaches 34kt, at
       // which point (and only then) it gets the next name off the list —

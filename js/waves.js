@@ -23,6 +23,7 @@ export class TropicalWave {
     this.bornDay = bornDay;
     this.alive = true;
     this.spawned = false; // becomes true once it produces a storm (then retires)
+    this.landDisruption = 0; // accumulates while over land, decays while over water — see genesisPotential's use of it
   }
 
   // Real waves aren't immune to the large-scale steering flow they're
@@ -40,6 +41,15 @@ export class TropicalWave {
     let uKt = baselineUKt, vKt = 0;
     if (env) {
       const s = env.stateAt(this.lat, this.lon);
+      // Real disruption from crossing significant land lingers rather
+      // than resetting instantly the moment the wave clears back over
+      // water — accumulates while over land, decays gradually
+      // afterward. See genesisPotential's use of this in waves.js.
+      if (s.land > 0.3) {
+        this.landDisruption = Math.min(1, this.landDisruption + dtDays * GEN.landDisruptionAccumPerDay);
+      } else {
+        this.landDisruption = Math.max(0, this.landDisruption - dtDays * GEN.landDisruptionRecoveryPerDay);
+      }
       // Waves use the 850mb (low-level) layer specifically — the real
       // fix for wave/weak-storm tracks having felt too erratic after
       // steering noise was added directly to a single shared field
@@ -123,15 +133,25 @@ export class WaveSource {
     return GEN.mdrLateSeasonMultAtNov15 + t * (GEN.mdrLateSeasonMultAtDec15 - GEN.mdrLateSeasonMultAtNov15);
   }
 
-  // Spawn latitude shifts south starting Nov 1 (unchanged through Oct 15-
-  // Nov 1, matching "still often" implying still-normal character too),
-  // fully shifted by Dec 15 — real late-season MDR activity, when it
-  // occurs, skews lower-latitude as the eastern MDR shear increase makes
-  // higher-latitude development progressively less likely.
+  // Full seasonal structure: low riders early season (June), higher-
+  // latitude emergence with meaningfully wider spread near peak season
+  // (Aug-Sep) — letting both 20N+ emergence and low riders happen side
+  // by side during peak, not just a shifted mean — then declining back
+  // toward low riders late season (existing Nov1-Dec15 mechanic below,
+  // unchanged).
   _spawnLat(doy) {
+    const rampT = Math.max(0, Math.min(1,
+      (doy - GEN.waveEarlySeasonRampStartDoy) / (GEN.waveEarlySeasonRampEndDoy - GEN.waveEarlySeasonRampStartDoy)));
+    const seasonBaseLat = GEN.waveEarlySeasonBaseLat + (GEN.waveBaseLat - GEN.waveEarlySeasonBaseLat) * rampT;
+    const seasonJitter = GEN.waveEarlySeasonJitterDeg + (GEN.wavePeakSeasonJitterDeg - GEN.waveEarlySeasonJitterDeg) * rampT;
+
+    // Existing late-season decline, applied on top of whichever
+    // seasonal base/jitter the ramp above produced — jitter also
+    // tightens back toward early-season character late season, not
+    // just the mean shifting.
     const t = Math.max(0, Math.min(1,
       (doy - GEN.waveLateSeasonLatShiftStartDoy) / (GEN.waveLateSeasonLatShiftFullDoy - GEN.waveLateSeasonLatShiftStartDoy)));
-    const baseLat = GEN.waveBaseLat + (GEN.waveLateSeasonBaseLat - GEN.waveBaseLat) * t;
+    const baseLat = seasonBaseLat + (GEN.waveLateSeasonBaseLat - seasonBaseLat) * t;
     // Bell-shaped rather than flat-uniform jitter — sum of two
     // independent draws, so spawns cluster toward the base latitude and
     // taper at the extremes instead of being equally likely anywhere in
@@ -140,8 +160,9 @@ export class WaveSource {
     // zone where genuine tropical development is inherently much less
     // likely — a real contributor to too many TDs dying before reaching
     // TS. Same total range as before, just realistically weighted.
-    const jitter = ((this.rand() + this.rand()) - 1) * GEN.waveLatJitterDeg;
-    return baseLat + jitter;
+    const jitter = seasonJitter + (GEN.waveEarlySeasonJitterDeg - seasonJitter) * t;
+    const jitterDraw = ((this.rand() + this.rand()) - 1) * jitter;
+    return baseLat + jitterDraw;
   }
 
   step(dtDays, env, dayNum) {
@@ -154,7 +175,7 @@ export class WaveSource {
 // Genesis Potential Index: combines SST, shear, dry air and large-scale
 // convective favorability into a single 0..1 "is this a good spot/time"
 // score. Loosely inspired by Emanuel-Nolan style GPI, heavily simplified.
-export function genesisPotential(env, osc, lat, lon, dayNum) {
+export function genesisPotential(env, osc, lat, lon, dayNum, landDisruption = 0) {
   const s = env.stateAt(lat, lon);
   if (s.land > 0.3) return 0;
 
@@ -193,6 +214,25 @@ export function genesisPotential(env, osc, lat, lon, dayNum) {
       Math.abs(lon - mtGeo.lonCenter) <= mtGeo.lonHalfExtent) {
     gpi += env.monsoonTroughStrength(dayNum) * GEN.monsoonTroughGpiBoost;
   }
+
+  // Coriolis constraint — real TC genesis is essentially impossible
+  // very close to the equator (the spin-up a closed circulation needs
+  // depends on the Coriolis parameter, which vanishes there) and only
+  // becomes meaningfully favorable by roughly 8-10 degrees latitude.
+  // This is a hard dynamical constraint, not something favorable SST/
+  // shear/ITCZ convection should be able to override — applied
+  // multiplicatively as a genuine gate, not an additive term the rest
+  // of the formula could outweigh.
+  const coriolisTerm = Math.max(0, Math.min(1, (Math.abs(lat) - 3) / 7));
+  gpi *= coriolisTerm;
+
+  // A wave that's recently crossed significant land (e.g., northern
+  // South America) doesn't instantly regain full potential the moment
+  // it clears the coast — real disruption from losing its low-level
+  // moisture/structure over land lingers for a while. landDisruption is
+  // an accumulated, decaying 0-1 value tracked per-wave (see
+  // TropicalWave.step) and applied here as a genesis-potential penalty.
+  gpi *= (1 - landDisruption * GEN.landDisruptionGpiPenalty);
 
   return Math.max(0, Math.min(1, gpi));
 }
